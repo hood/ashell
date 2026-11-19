@@ -29,8 +29,26 @@ step "git stash -q -u" 0.4 "stash"
 pkill -f "ashell daemon" ; sleep 0.2
 step "true" 0.4 "daemon killed -> fallback"
 step "true" 0.4 "reconnected"
+pid1=$(pgrep -f "ashell daemon")
+touch "$B"; sleep 1.5
+step "true" 0.4 "binary replaced -> fallback"
+step "true" 0.4 "new daemon"
+pid2=$(pgrep -f "ashell daemon")
+printf '%-34s | %s\n' "daemon pid before/after upgrade" "$pid1 -> $pid2"
+
+# Big repo: time until the async git status patch replaces the placeholder.
+waitpatch() {
+  local start=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+  t send-keys -t e2e "$1" Enter
+  sleep 0.01; printf '%-34s | %s\n' "$2, +10ms" "$(line)"
+  case "$(line)" in *…*) ;; *) printf '%-34s | %s\n' "$2: instant from cache" ""; return ;; esac
+  for _ in $(seq 250); do
+    case "$(line)" in *…*) sleep 0.02 ;; *) break ;; esac
+  done
+  local end=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+  printf '%-34s | %s\n' "$2, patched after $(echo "($end-$start)*1000/1" | bc)ms" "$(line)"
+}
 if [ -n "$BIG" ]; then
-  t send-keys -t e2e "cd $BIG" Enter
-  sleep 0.01; printf '%-34s | %s\n' "big repo, +10ms" "$(line)"
-  sleep 0.5;  printf '%-34s | %s\n' "big repo, +500ms (patched)" "$(line)"
+  waitpatch "cd $BIG" "big repo cold"
+  waitpatch "cd - >/dev/null; cd $BIG" "big repo revisit"
 fi

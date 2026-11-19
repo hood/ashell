@@ -1,8 +1,8 @@
 //! Git state. HEAD is read from disk every prompt (µs). Status is computed off
 //! the critical path, cached per repo, and invalidated by an FS watcher.
 //!
-//! M1 computes status with `git --no-optional-locks status` in a worker thread;
-//! M1.5 replaces it with a native parallel index walk.
+//! Status runs in-process via gitoxide (`gitnative`); `ASHELL_GIT=cli` falls
+//! back to `git --no-optional-locks status`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use notify::{RecursiveMode, Watcher};
 
 use crate::bus::BUS;
+use crate::untracked;
 
 pub struct Location {
     pub workdir: PathBuf,
@@ -34,6 +35,9 @@ pub fn discover(cwd: &Path) -> Option<Location> {
             let p = Path::new(s.strip_prefix("gitdir:")?.trim());
             if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }
         };
+        if fs::symlink_metadata(gitdir.join("HEAD")).is_err() {
+            continue; // not a usable repo (git skips these too)
+        }
         let commondir = fs::read_to_string(gitdir.join("commondir"))
             .ok()
             .map(|c| gitdir.join(c.trim()))
@@ -140,7 +144,33 @@ pub fn parse_porcelain_v2(out: &[u8]) -> Status {
     st
 }
 
-pub fn compute_status(workdir: &Path) -> Option<Status> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    Native,
+    Cli,
+}
+
+impl Backend {
+    pub fn from_env() -> Self {
+        match std::env::var("ASHELL_GIT").as_deref() {
+            Ok("cli") => Self::Cli,
+            _ => Self::Native,
+        }
+    }
+}
+
+pub fn compute_status(workdir: &Path, cache: &mut untracked::Cache) -> Option<Status> {
+    compute_status_with(workdir, Backend::from_env(), cache)
+}
+
+pub fn compute_status_with(workdir: &Path, backend: Backend, cache: &mut untracked::Cache) -> Option<Status> {
+    match backend {
+        Backend::Native => crate::gitnative::status(workdir, cache),
+        Backend::Cli => cli_status(workdir),
+    }
+}
+
+pub(crate) fn cli_status(workdir: &Path) -> Option<Status> {
     let out = Command::new("git")
         .arg("-C")
         .arg(workdir)
@@ -154,6 +184,9 @@ pub fn compute_status(workdir: &Path) -> Option<Status> {
 pub struct Cached {
     /// Watcher generation the value was computed at.
     pub generation: u64,
+    /// When the computation started: without a watcher, a value is fresh for
+    /// a prompt only if computed after that prompt was requested.
+    pub started: Instant,
     pub status: Arc<Status>,
     pub took: Duration,
 }
@@ -171,6 +204,8 @@ pub struct Repo {
     cv: Condvar,
     pub last_used: AtomicU64,
     head: StatCache<Option<Head>>,
+    /// Untracked-scan state, shared by the recompute and warm-up threads.
+    untracked: Arc<Mutex<untracked::Cache>>,
     stash: StatCache<usize>,
     /// One-shot mode: no cache, compute synchronously.
     oneshot: bool,
@@ -194,6 +229,7 @@ impl Repo {
             cv: Condvar::new(),
             last_used: AtomicU64::new(0),
             head: StatCache::new(),
+            untracked: Arc::new(Mutex::new(untracked::Cache::default())),
             stash: StatCache::new(),
             watching: AtomicBool::new(false),
             watcher: Mutex::new(None),
@@ -243,17 +279,24 @@ impl Repo {
         BUS.bump();
     }
 
-    /// Returns the best known status, kicking a recompute if it is stale and
-    /// waiting at most `deadline` for it.
-    pub fn status(self: &Arc<Self>, deadline: Duration) -> (Option<Arc<Status>>, Freshness) {
+    /// Returns the best known status for a prompt requested at `since`,
+    /// kicking a recompute if it is stale and waiting at most `deadline` for it.
+    pub fn status(self: &Arc<Self>, deadline: Duration, since: Instant) -> (Option<Arc<Status>>, Freshness) {
         if self.oneshot {
-            return match compute_status(&self.loc.workdir) {
+            // No warm cache in a one-shot process: git's on-disk untracked
+            // cache beats a cold native scan (aports: 85ms vs 1.5s).
+            let wd = &self.loc.workdir;
+            return match cli_status(wd).or_else(|| compute_status(wd, &mut untracked::Cache::default())) {
                 Some(s) => (Some(Arc::new(s)), Freshness::Fresh),
                 None => (None, Freshness::Missing),
             };
         }
         let trusted = |c: &Cached| {
-            self.watching.load(Ordering::Acquire) && c.generation == self.generation.load(Ordering::Acquire)
+            if self.watching.load(Ordering::Acquire) {
+                c.generation == self.generation.load(Ordering::Acquire)
+            } else {
+                c.started >= since
+            }
         };
         let mut g = self.inner.lock().unwrap();
         if g.cached.as_ref().is_some_and(trusted) {
@@ -281,6 +324,28 @@ impl Repo {
         }
     }
 
+    /// Native status when its untracked cache is warm. While cold (first scan
+    /// of aports: ~1.5s of readdir) answer with git, which has its own on-disk
+    /// untracked cache, and warm ours in the background.
+    fn status_now(&self) -> Option<Status> {
+        let wd = &self.loc.workdir;
+        match self.untracked.try_lock() {
+            Ok(mut cache) if cache.is_warm() => return compute_status(wd, &mut cache),
+            Ok(cache) => {
+                drop(cache);
+                let (wd2, c) = (wd.clone(), self.untracked.clone());
+                std::thread::spawn(move || {
+                    let mut cache = c.lock().unwrap();
+                    if !cache.is_warm() {
+                        compute_status(&wd2, &mut cache);
+                    }
+                });
+            }
+            Err(_) => {} // warming up
+        }
+        cli_status(wd).or_else(|| compute_status(wd, &mut self.untracked.lock().unwrap()))
+    }
+
     pub fn last_compute(&self) -> Option<Duration> {
         self.inner.lock().unwrap().cached.as_ref().map(|c| c.took)
     }
@@ -288,13 +353,16 @@ impl Repo {
     fn recompute(&self) {
         // Value is only as fresh as the generation observed before scanning.
         let generation = self.generation.load(Ordering::Acquire);
-        let t = Instant::now();
-        let st = compute_status(&self.loc.workdir);
-        let took = t.elapsed();
+        let started = Instant::now();
+        // Native can fail on exotic repos (reftable, sha256...): fall back to
+        // git, then to "clean" so a broken repo never causes a retry loop.
+        let st = self
+            .status_now()
+            .or_else(|| cli_status(&self.loc.workdir))
+            .unwrap_or_default();
+        let took = started.elapsed();
         let mut g = self.inner.lock().unwrap();
-        if let Some(st) = st {
-            g.cached = Some(Cached { generation, status: Arc::new(st), took });
-        }
+        g.cached = Some(Cached { generation, started, status: Arc::new(st), took });
         g.computing = false;
         drop(g);
         self.cv.notify_all();

@@ -140,7 +140,8 @@ resolve  = ["path", "file", "spawn"]   # spawn is last resort
 | Milestone | Scope | Target |
 |---|---|---|
 | M1 | Daemon, zsh, directory / git / status / duration / character, one-shot fallback | Frame 1 <0.5ms in `aports` warm, git never blocks |
-| M1.5 | Native git status (parallel stat walk, watcher-dirty set) replacing `git status` in the worker | Cold status < `git status`, warm O(changed) |
+| M1.5 | Native git status (gitoxide + in-memory untracked cache), upgrade restart, watcher-failure fallback | Warm status < `git status` |
+| M1.6 | Watcher-dirty set: skip the per-dir stat walk, O(changed) warm status | aports warm < 10ms |
 | M2 | bash, fish, toolchains, config file + hot reload, `explain`, `bench` | |
 | M3 | Custom segments, Starship config import | |
 | M4 | nushell, PowerShell, WASM plugins | |
@@ -176,12 +177,60 @@ Try it: `cargo build --release && eval "$(target/release/ashell init zsh)"`
 - `inotify` recursive watch setup is slow on big trees, so watchers start off
   the render path and cache entries are never trusted until the watcher is up.
 
-### Next (M1.5)
+## M1.5 status
 
-- Native git status replacing `git status` in the worker.
-- Daemon version handshake: restart on binary upgrade (today: `ashell stop`).
-- If the watcher can't start, the follow-up loop recomputes git status until the
-  10s hard limit; needs backoff.
+Done:
+
+- **Native git status** (`src/gitnative.rs`): gitoxide for index/worktree
+  stat walk, HEAD-tree vs index and ahead/behind. No subprocess.
+- **In-memory untracked cache** (`src/untracked.rs`): git's untracked cache
+  idea, kept in daemon memory. Each dir's listing and ignore classification is
+  keyed by (ino, mtime); re-runs `stat` dirs instead of `readdir` (3µs vs
+  ~90µs here). `.gitignore` edits drop the affected subtree, global exclude
+  edits drop everything. Honors `core.ignoreCase`.
+- **Cold start**: while a repo's cache is cold, status comes from `git` (which
+  has its own on-disk untracked cache) and the native cache warms in the
+  background. One-shot mode always uses `git` for the same reason.
+- **Upgrade restart**: the daemon exits when its binary changes; the next
+  prompt falls back once and spawns the new build.
+- **No watcher**: a cached status is fresh only if computed after the prompt
+  was requested, so no recompute loops. Native failure falls back to `git`,
+  then to "clean".
+- Repo discovery skips `.git` dirs without `HEAD`, like git.
+
+### Correctness
+
+- `tests/git-diff.sh`: native vs `git status --porcelain=v2` on every local
+  repo. **304/304 match**, cold and warm.
+- `native_matches_git_through_mutations` test: one repo mutated through 22 steps
+  with a warm cache (nested/ignored dirs, `.gitignore` create/edit/remove,
+  nested repo, staged+modified, intent-to-add, case-only rename, deletes,
+  ahead, behind, conflict), compared to git after each step.
+
+### Measured
+
+| Repo | native warm | `git status` | native cold |
+|---|---|---|---|
+| aports (23k files, 12.5k dirs, git untracked cache on) | 68-78 ms | 80-86 ms | 1.5 s (hidden: git answers while warming) |
+| astro (7k files, no untracked cache) | 21-24 ms | 280-350 ms | 360 ms |
+| All 304 local repos, summed | **4.1 s** | 16.4 s | 26 s |
+
+Native warm is faster than git in 303/304 repos. In the shell (e2e): first
+visit to aports shows the status 180ms after `cd`; revisits are instant from
+cache. Prompt cost in zsh unchanged: 108-135 µs.
+
+### Lessons
+
+- gix's dirwalk has no untracked cache: 1.07s of 1.1s in aports was `readdir`.
+  git without its untracked cache takes the same 1.24s.
+- macOS repos default to `core.ignoreCase=true`: index lookups must fold case
+  or case-only renames show up as untracked.
+
+### Next (M1.6)
+
+- Watcher-dirty set to skip the 12.5k dir stats (~40ms) and restat only
+  changed index entries.
+- Parallel stat walk across top-level dirs.
 
 ## Risks
 

@@ -44,6 +44,7 @@ pub fn run(sock: &Path) -> io::Result<()> {
     let listener = UnixListener::bind(sock)?;
     fs::set_permissions(sock, fs::Permissions::from_mode(0o600))?;
 
+    exit_on_upgrade(sock.to_path_buf());
     let engine = Arc::new(Engine::new(false));
     let me = unsafe { libc::getuid() };
     for stream in listener.incoming() {
@@ -102,7 +103,7 @@ fn serve(stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()
                 let t0 = Instant::now();
                 session.seq.store(req.seq, Ordering::Release);
                 let shell = *session.shell.lock().unwrap();
-                let r = engine.render(&req, DEADLINE, shell);
+                let r = engine.render(&req, DEADLINE, t0, shell);
                 session.send_frame(req.seq, !r.pending, &r.left, &r.right)?;
                 if r.pending || (r.watchable && req.ran_command()) {
                     let (s, e) = (session.clone(), engine.clone());
@@ -142,7 +143,7 @@ fn follow_up(
         if s.seq.load(Ordering::Acquire) != req.seq {
             return; // a newer prompt took over
         }
-        let r = engine.render(&req, Duration::ZERO, shell);
+        let r = engine.render(&req, Duration::ZERO, t0, shell);
         pending = r.pending;
         if r.left != left || r.right != right {
             if s.send_frame(req.seq, !pending, &r.left, &r.right).is_err() {
@@ -151,6 +152,24 @@ fn follow_up(
             (left, right) = (r.left, r.right);
         }
     }
+}
+
+/// Exits when our binary is replaced (rebuild, upgrade). Clients see the
+/// hangup, fall back for one prompt and spawn the new binary.
+fn exit_on_upgrade(sock: PathBuf) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(exe) = std::env::current_exe() else { return };
+    let key = |p: &Path| fs::metadata(p).ok().map(|m| (m.ino(), m.mtime(), m.mtime_nsec(), m.size()));
+    let original = key(&exe);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if key(&exe) != original {
+                let _ = fs::remove_file(&sock);
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 #[cfg(target_os = "linux")]

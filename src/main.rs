@@ -2,8 +2,10 @@ mod bus;
 mod daemon;
 mod engine;
 mod git;
+mod gitnative;
 mod protocol;
 mod render;
+mod untracked;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,7 +26,8 @@ usage:
   ashell stop [--socket P]
   ashell prompt [--shell zsh|bash|plain] [--status N] [--duration MS] [--keymap K]
   ashell explain [--status N] [--duration MS]
-  ashell socket-path";
+  ashell socket-path
+  ashell git-status [--backend native|cli] [--warm]   counts + timing, for diffing backends";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,12 +58,45 @@ fn main() -> ExitCode {
         }
         Some("prompt") => {
             let shell = opt("--shell").and_then(Shell::parse).unwrap_or(Shell::Plain);
-            let r = Engine::new(true).render(&local_request(opt), Duration::MAX, shell);
+            let r = Engine::new(true).render(&local_request(opt), Duration::MAX, Instant::now(), shell);
             match shell {
                 Shell::Plain => println!("{}\n{}", r.left, r.right),
                 _ => print!("{}\x1f{}", r.left, r.right),
             }
             Ok(())
+        }
+        Some("git-status") => {
+            let backend = match opt("--backend") {
+                Some("cli") => git::Backend::Cli,
+                _ => git::Backend::Native,
+            };
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match git::discover(&cwd) {
+                Some(loc) => {
+                    let mut cache = untracked::Cache::default();
+                    if flag("--warm") {
+                        git::compute_status_with(&loc.workdir, backend, &mut cache);
+                    }
+                    let t = Instant::now();
+                    let st = git::compute_status_with(&loc.workdir, backend, &mut cache);
+                    let took = t.elapsed();
+                    if std::env::var_os("ASHELL_DEBUG").is_some() {
+                        eprintln!("{:?}", cache.stats);
+                    }
+                    match st {
+                        Some(s) => {
+                            println!(
+                                "staged={} modified={} untracked={} conflicted={} ahead={} behind={} took_us={}",
+                                s.staged, s.modified, s.untracked, s.conflicted, s.ahead, s.behind,
+                                took.as_micros()
+                            );
+                            Ok(())
+                        }
+                        None => Err("status failed".into()),
+                    }
+                }
+                None => Err("not in a git repo".into()),
+            }
         }
         Some("explain") => {
             explain(local_request(opt));
@@ -93,19 +129,20 @@ fn local_request<'a>(opt: impl Fn(&str) -> Option<&'a str>) -> Request {
 /// per-segment timings.
 fn explain(req: Request) {
     let engine = Engine::new(false);
+    let since = Instant::now();
     let t = Instant::now();
-    let cold = engine.render(&req, Duration::ZERO, Shell::Plain);
+    let cold = engine.render(&req, Duration::ZERO, since, Shell::Plain);
     let cold_t = t.elapsed();
     // Wait for async work (git status) to land.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let mut warm = engine.render(&req, Duration::from_millis(50), Shell::Plain);
+    let mut warm = engine.render(&req, Duration::from_millis(50), since, Shell::Plain);
     while warm.pending && Instant::now() < deadline {
-        warm = engine.render(&req, Duration::from_millis(50), Shell::Plain);
+        warm = engine.render(&req, Duration::from_millis(50), since, Shell::Plain);
     }
     let mut samples: Vec<(Duration, engine::Rendered)> = (0..500)
         .map(|_| {
             let t = Instant::now();
-            let r = engine.render(&req, Duration::ZERO, Shell::Plain);
+            let r = engine.render(&req, Duration::ZERO, since, Shell::Plain);
             (t.elapsed(), r)
         })
         .collect();

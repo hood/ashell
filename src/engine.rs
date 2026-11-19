@@ -59,7 +59,8 @@ impl Engine {
         r
     }
 
-    pub fn render(&self, req: &Request, deadline: Duration, shell: Shell) -> Rendered {
+    /// `since`: when the prompt was requested; bounds freshness of unwatched state.
+    pub fn render(&self, req: &Request, deadline: Duration, since: Instant, shell: Shell) -> Rendered {
         let mut timings = Vec::new();
         let mut t = Instant::now();
         let mut lap = |name, timings: &mut Vec<_>| {
@@ -79,7 +80,7 @@ impl Engine {
 
         let mut pending = false;
         if let Some(r) = &repo {
-            pending = git_segment(&mut left, r, deadline);
+            pending = git_segment(&mut left, r, deadline, since);
             lap("git", &mut timings);
         }
 
@@ -126,13 +127,13 @@ fn directory(l: &mut Line, cwd: &Path, home: Option<&str>, repo: Option<&Repo>) 
 }
 
 /// Returns true when the status part is still pending.
-fn git_segment(l: &mut Line, repo: &Arc<Repo>, deadline: Duration) -> bool {
+fn git_segment(l: &mut Line, repo: &Arc<Repo>, deadline: Duration, since: Instant) -> bool {
     match repo.head() {
         Some(Head::Branch(b)) => l.seg(sgr::BRANCH, &format!("{BRANCH_GLYPH}{b}")),
         Some(Head::Detached(h)) => l.seg(sgr::BRANCH, &format!("{BRANCH_GLYPH}@{h}")),
         None => return false,
     }
-    let (st, fresh) = repo.status(deadline);
+    let (st, fresh) = repo.status(deadline, since);
     let stale = !matches!(fresh, Freshness::Fresh);
     let Some(st) = st else {
         l.seg(sgr::DIM, "…");

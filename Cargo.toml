@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+gix = { version = "0.90", default-features = false, features = ["status", "revision", "parallel", "sha1", "max-performance"] }
 
 [profile.release]
 lto = "fat"
