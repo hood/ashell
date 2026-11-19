@@ -1,0 +1,21 @@
+[package]
+name = "ashell"
+version = "0.1.0"
+edition = "2024"
+description = "Fast, lazy, daemon-backed shell prompt"
+license = "MIT"
+
+[[bin]]
+name = "ashell"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = true
