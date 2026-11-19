@@ -5,10 +5,12 @@ set -u
 B=${ASHELL_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/ashell}
 BIG=${1:-}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ashell-e2e.XXXX")
+LOGD=$(mktemp -d "${TMPDIR:-/tmp}/ashell-e2e-log.XXXX")
+ZLOG=$LOGD/zsh.log
 t() { tmux -L ashell-test "$@"; }
 line() { t capture-pane -p -t e2e | grep -v '^$' | tail -1; }
 step() { t send-keys -t e2e "$1" Enter; sleep "$2"; printf '%-34s | %s\n' "$3" "$(line)"; }
-cleanup() { t kill-server 2>/dev/null; "$B" stop 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { t kill-server 2>/dev/null; "$B" stop 2>/dev/null; rm -rf "$WORK" "$LOGD"; }
 trap cleanup EXIT
 
 git -C "$WORK" init -q && touch "$WORK/a" && git -C "$WORK" add a &&
@@ -19,6 +21,9 @@ t new-session -d -s e2e -x 110 -y 30 "zsh -f"
 sleep 0.5
 t send-keys -t e2e "eval \"\$($B init zsh)\"" Enter
 sleep 0.5
+# Timestamp prompts and applied frames zsh-side: polling tmux is too coarse.
+t send-keys -t e2e "_l() { print -r -- \"\$EPOCHREALTIME \$1 \$_ashell_left\" >> $ZLOG }; functions[_of]=\$functions[_ashell_on_frame]; _ashell_on_frame() { _of \"\$@\"; _l frame }; _lp() { _l prompt }; precmd_functions+=(_lp); clear" Enter
+sleep 0.3
 step "clear" 0.3 "first prompts (daemon spawned)"
 step "cd $WORK" 0.3 "cd clean repo"
 step "touch b; git add b" 0.4 "stage a file"
@@ -48,7 +53,32 @@ waitpatch() {
   local end=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
   printf '%-34s | %s\n' "$2, patched after $(echo "($end-$start)*1000/1" | bc)ms" "$(line)"
 }
+# Runs `cmd`, waits for the prompt to contain `pattern`, and reports when
+# zsh showed it relative to the prompt (from the zsh-side log).
+waitfor() {
+  : > "$ZLOG"
+  t send-keys -t e2e "$1" Enter
+  for _ in $(seq 100); do
+    case "$(line)" in *"$2"*) break ;; *) sleep 0.03 ;; esac
+  done
+  local when=$(sed -E 's/\x1b\[[0-9;]*m//g; s/%[{}]//g' "$ZLOG" | awk -v pat="$2" '
+    $2 == "prompt" { t0 = $1; first = (index($0, pat) > 0); if (first) { print "in first frame"; exit } next }
+    t0 && index($0, pat) { printf "+%.1fms after prompt", ($1 - t0) * 1000; exit }')
+  printf '%-34s | %s\n' "$3: ${when:-never}" "$(line)"
+}
 if [ -n "$BIG" ]; then
   waitpatch "cd $BIG" "big repo cold"
   waitpatch "cd - >/dev/null; cd $BIG" "big repo revisit"
+  # While the native cache warms up (aports: ~1.5s of readdir), git answers.
+  waitfor "touch .ashell-e2e-probe" '?1 ' "big repo new file (warming up)"
+  waitfor "rm .ashell-e2e-probe" 'master ❯' "big repo file removed (warming up)"
+  sleep 4
+  # Warm: watcher-driven incremental native status.
+  for i in 1 2 3; do
+    waitfor "touch .ashell-e2e-probe" '?1 ' "big repo new file #$i"
+    waitfor "rm .ashell-e2e-probe" 'master ❯' "big repo file removed #$i"
+  done
+  waitfor "echo >> README.md" '!1 ' "big repo edit tracked"
+  waitfor "git add README.md" '+1 ' "big repo git add"
+  waitfor "git reset -q --hard" 'master ❯' "big repo reset --hard"
 fi

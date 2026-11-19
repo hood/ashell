@@ -36,7 +36,7 @@ pub fn run(sock: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
 
-    let lock = OpenOptions::new().create(true).write(true).mode(0o600).open(dir.join("ashelld.lock"))?;
+    let lock = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(dir.join("ashelld.lock"))?;
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Ok(()); // another daemon owns this socket
     }
@@ -104,6 +104,9 @@ fn serve(stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()
                 session.seq.store(req.seq, Ordering::Release);
                 let shell = *session.shell.lock().unwrap();
                 let r = engine.render(&req, DEADLINE, t0, shell);
+                if *crate::DEBUG {
+                    eprintln!("frame1 seq={} +{:.1?} pending={}", req.seq, t0.elapsed(), r.pending);
+                }
                 session.send_frame(req.seq, !r.pending, &r.left, &r.right)?;
                 if r.pending || (r.watchable && req.ran_command()) {
                     let (s, e) = (session.clone(), engine.clone());
@@ -145,6 +148,9 @@ fn follow_up(
         }
         let r = engine.render(&req, Duration::ZERO, t0, shell);
         pending = r.pending;
+        if *crate::DEBUG {
+            eprintln!("follow-up +{:.1?} changed={}", t0.elapsed(), r.left != left || r.right != right);
+        }
         if r.left != left || r.right != right {
             if s.send_frame(req.seq, !pending, &r.left, &r.right).is_err() {
                 return;
@@ -202,7 +208,9 @@ pub fn spawn_detached(sock: &Path) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon").arg("--socket").arg(sock);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // ASHELL_LOG=<file> keeps the detached daemon's stderr (debugging).
+    let log = std::env::var_os("ASHELL_LOG").and_then(|p| fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log.map_or_else(Stdio::null, Stdio::from));
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();

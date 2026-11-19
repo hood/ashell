@@ -7,7 +7,7 @@
 //! Semantics match `git status -unormal`: a directory without tracked files is
 //! one entry if it holds any untracked file or is a nested repo.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use gix::bstr::{BStr, BString, ByteSlice};
 use gix::index::entry::Mode;
 
-type FileKey = Option<(u64, i64, i64, u64)>;
+pub type FileKey = Option<(u64, i64, i64, u64)>;
 
-fn file_key(p: &Path) -> FileKey {
+pub fn file_key(p: &Path) -> FileKey {
     let m = fs::symlink_metadata(p).ok()?;
     Some((m.ino(), m.mtime(), m.mtime_nsec(), m.size()))
 }
@@ -32,6 +32,9 @@ struct Child {
     name: BString,
     kind: Kind,
     ignored: bool,
+    /// Dirs: untracked count contributed by this child as of `Cache::epoch`.
+    /// Stays valid while no change (FS or index) lands at or below it.
+    memo: Option<(u64, u32)>,
 }
 
 struct Node {
@@ -51,6 +54,8 @@ pub struct Stats {
 pub struct Cache {
     nodes: BTreeMap<BString, Node>,
     globals: Vec<FileKey>,
+    /// Bumped on every walk that cannot trust memos, retiring all of them.
+    epoch: u64,
     pub stats: Stats,
 }
 
@@ -59,21 +64,29 @@ impl Cache {
         !self.nodes.is_empty()
     }
 
-    pub fn count(&mut self, repo: &gix::Repository, index: &gix::index::State) -> Option<u32> {
+    /// With `trust` (from a watcher), only dirs with changes are revalidated
+    /// with `stat` and subtrees without changes reuse their counts.
+    pub fn count(&mut self, repo: &gix::Repository, index: &IndexView, trust: Option<&Trust>) -> Option<u32> {
         let workdir = repo.workdir()?.to_path_buf();
         let globals: Vec<FileKey> = global_exclude_files(repo).iter().map(|p| file_key(p)).collect();
         if globals != self.globals {
             self.nodes.clear();
             self.globals = globals;
         }
-        let mut stack = repo
-            .excludes(index, None, gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped)
-            .ok()?;
         self.stats = Stats::default();
-        let ignore_case = repo.config_snapshot().boolean("core.ignoreCase").unwrap_or(false);
-        let icase = ignore_case.then(|| index.prepare_icase_backing());
-        let index = IndexView { state: index, icase: icase.as_ref() };
-        let mut w = Walk { cache: self, stack: &mut stack, index, workdir, count: 0 };
+        if trust.is_none() {
+            self.epoch += 1;
+        }
+        let mut w = Walk {
+            cache: self,
+            repo,
+            stack: None,
+            index,
+            workdir,
+            trust,
+            forced: false,
+            count: 0,
+        };
         w.walk(&mut BString::default(), false);
         Some(w.count)
     }
@@ -93,58 +106,163 @@ fn global_exclude_files(repo: &gix::Repository) -> Vec<PathBuf> {
     v
 }
 
-/// Index lookups that honor `core.ignoreCase` like git does (macOS default).
-struct IndexView<'a> {
-    state: &'a gix::index::State,
-    icase: Option<&'a gix::index::AccelerateLookup<'a>>,
+/// Case-folded (ASCII, like git) lookup tables for an index, built once per
+/// index version (~2.5ms for aports' 23k entries) and kept across runs.
+#[derive(Default)]
+pub struct Icase {
+    files: HashMap<BString, usize>,
+    /// Every directory holding entries, to the first entry below it.
+    dirs: HashMap<BString, usize>,
 }
 
-impl IndexView<'_> {
-    fn entry(&self, path: &BStr) -> Option<&gix::index::Entry> {
-        match self.icase {
-            Some(l) => self.state.entry_by_path_icase(path, true, l),
-            None => self.state.entry_by_path(path),
+impl Icase {
+    pub fn new(state: &gix::index::State) -> Self {
+        let mut t = Icase::default();
+        for (i, e) in state.entries().iter().enumerate() {
+            let p = e.path(state).to_ascii_lowercase();
+            let mut d = p.as_slice();
+            while let Some(j) = d.rfind_byte(b'/') {
+                d = &d[..j];
+                if t.dirs.contains_key(d) {
+                    break;
+                }
+                t.dirs.insert(d.into(), i);
+            }
+            t.files.entry(p.into()).or_insert(i);
         }
+        t
+    }
+}
+
+/// Index lookups that honor `core.ignoreCase` like git does (macOS default).
+pub struct IndexView<'a> {
+    pub state: &'a gix::index::State,
+    icase: Option<&'a Icase>,
+}
+
+impl<'a> IndexView<'a> {
+    /// `icase`: tables for `state`, when `core.ignoreCase` is set.
+    pub fn new(state: &'a gix::index::State, icase: Option<&'a Icase>) -> Self {
+        Self { state, icase }
+    }
+
+    pub fn entry(&self, path: &BStr) -> Option<&'a gix::index::Entry> {
+        let state = self.state;
+        state.entry_by_path(path).or_else(|| {
+            let i = *self.icase?.files.get(path.to_ascii_lowercase().as_slice())?;
+            state.entries().get(i)
+        })
     }
 
     /// Any tracked entry below `dir` (no trailing slash).
     fn has_entries_under(&self, dir: &BStr) -> bool {
-        match self.icase {
-            Some(l) => self.state.entry_closest_to_directory_or_directory_icase(dir, true, l).is_some(),
-            None => self.state.entry_closest_to_directory_or_directory(dir).is_some(),
-        }
+        self.dir_entry(dir).is_some()
+    }
+
+    /// An entry inside `dir`, or `dir` itself if it is a submodule.
+    fn dir_entry(&self, dir: &BStr) -> Option<&'a gix::index::Entry> {
+        let state = self.state;
+        state.entry_closest_to_directory_or_directory(dir).or_else(|| {
+            let icase = self.icase?;
+            let key = dir.to_ascii_lowercase();
+            let i = icase.dirs.get(key.as_slice()).or_else(|| icase.files.get(key.as_slice()))?;
+            let e = state.entries().get(*i)?;
+            (icase.dirs.contains_key(key.as_slice()) || e.mode == Mode::COMMIT).then_some(e)
+        })
+    }
+
+    /// `dir` spelled as in the index, if it holds tracked entries.
+    pub fn dir_spelling(&self, dir: &BStr) -> Option<BString> {
+        let p = self.dir_entry(dir)?.path(self.state);
+        Some(p.get(..dir.len()).unwrap_or(p).into())
     }
 }
 
 fn debug_entry(rela: &BStr) {
-    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("ASHELL_DEBUG").is_some());
-    if *ON {
+    if *crate::DEBUG {
         eprintln!("untracked: {rela}");
     }
 }
 
-struct Walk<'a, 'r> {
+pub(crate) fn parent(p: &BStr) -> &BStr {
+    p.rfind_byte(b'/').map_or(b"".as_bstr(), |i| p[..i].as_bstr())
+}
+
+/// What changed since the previous walk.
+pub struct Trust<'a> {
+    /// Changed paths. A changed dir may have been moved in with stale
+    /// cached descendants, so its whole subtree is revalidated.
+    changes: &'a HashSet<BString>,
+    /// Dirs whose listing may have changed: each changed path and its parent.
+    restat: HashSet<BString>,
+    /// Every ancestor of a changed path or index entry: memos there are stale.
+    touched: HashSet<BString>,
+}
+
+impl<'a> Trust<'a> {
+    /// `changes`: FS paths from a watcher. `index_paths`: index entries added,
+    /// removed or changed (they flip files between tracked and untracked).
+    pub fn new(changes: &'a HashSet<BString>, index_paths: &[BString]) -> Self {
+        let mut t = Trust { changes, restat: HashSet::new(), touched: HashSet::new() };
+        for p in changes {
+            t.restat.insert(p.clone());
+            t.restat.insert(parent(p.as_bstr()).to_owned());
+        }
+        for p in changes.iter().chain(index_paths) {
+            let mut a = p.as_bstr();
+            t.touched.insert(a.to_owned());
+            while !a.is_empty() {
+                a = parent(a);
+                if !t.touched.insert(a.to_owned()) {
+                    break;
+                }
+            }
+        }
+        t
+    }
+}
+
+struct Walk<'a, 'r, 'i> {
     cache: &'a mut Cache,
-    stack: &'a mut gix::AttributeStack<'r>,
-    index: IndexView<'a>,
+    repo: &'r gix::Repository,
+    /// Ignore rules, built only when a dir has to be re-read (~0.6ms).
+    stack: Option<gix::AttributeStack<'r>>,
+    index: &'a IndexView<'i>,
     workdir: PathBuf,
+    /// None: revalidate everything.
+    trust: Option<&'a Trust<'a>>,
+    /// Inside a changed dir: revalidate everything below.
+    forced: bool,
     count: u32,
 }
 
-impl Walk<'_, '_> {
+impl Walk<'_, '_, '_> {
     /// Visits dir `rela` ("" = root). With `probe`, stops at the first untracked
     /// file and only reports whether one exists, counting nothing.
     fn walk(&mut self, rela: &mut BString, probe: bool) -> bool {
-        match self.load(rela) {
+        let forced = self.forced;
+        self.forced |= self.trust.is_some_and(|t| t.changes.contains(rela));
+        let found = match self.load(rela) {
             Some((children, _)) => self.walk_children(rela, children, probe),
             None => false,
+        };
+        self.forced = forced;
+        found
+    }
+
+    /// A child dir's count from the previous walk, if nothing touched it.
+    fn memo(&self, rela: &BString, memo: Option<(u64, u32)>) -> Option<u32> {
+        let t = self.trust?;
+        match memo {
+            Some((epoch, n)) if epoch == self.cache.epoch && !self.forced && !t.touched.contains(rela) => Some(n),
+            _ => None,
         }
     }
 
-    fn walk_children(&mut self, rela: &mut BString, children: Vec<Child>, probe: bool) -> bool {
+    fn walk_children(&mut self, rela: &mut BString, mut children: Vec<Child>, probe: bool) -> bool {
         let base = rela.len();
         let mut found = false;
-        for c in children.iter().filter(|c| !c.ignored) {
+        for c in children.iter_mut().filter(|c| !c.ignored) {
             if base > 0 {
                 rela.push(b'/');
             }
@@ -158,7 +276,19 @@ impl Walk<'_, '_> {
                     }
                     untracked
                 }
-                Kind::Dir => self.visit_dir(rela, probe),
+                Kind::Dir if probe => self.visit_dir(rela, true),
+                Kind::Dir => match self.memo(rela, c.memo) {
+                    Some(n) => {
+                        self.count += n;
+                        n > 0
+                    }
+                    None => {
+                        let before = self.count;
+                        let hit = self.visit_dir(rela, false);
+                        c.memo = Some((self.cache.epoch, self.count - before));
+                        hit
+                    }
+                },
             };
             rela.truncate(base);
             if hit {
@@ -197,18 +327,25 @@ impl Walk<'_, '_> {
     /// Returns the dir's children (taken out of the cache; give them back with
     /// `put_back`) and whether it contains `.git`.
     fn load(&mut self, rela: &BString) -> Option<(Vec<Child>, bool)> {
+        if let Some(t) = self.trust
+            && !self.forced
+            && !t.restat.contains(rela)
+            && let Some(node) = self.cache.nodes.get_mut(rela)
+        {
+            return Some((std::mem::take(&mut node.children), node.has_dotgit));
+        }
         let abs = self.workdir.join(gix::path::from_bstr(rela.as_bstr()).ok()?);
         self.cache.stats.dirs_stat += 1;
         let key = file_key(&abs);
         key?;
         let mut stale_subtree = false;
-        if let Some(node) = self.cache.nodes.get_mut(rela) {
-            if node.key == key {
-                if node.gitignore.is_none() || file_key(&abs.join(".gitignore")) == node.gitignore {
-                    return Some((std::mem::take(&mut node.children), node.has_dotgit));
-                }
-                stale_subtree = true;
+        if let Some(node) = self.cache.nodes.get_mut(rela)
+            && node.key == key
+        {
+            if node.gitignore.is_none() || file_key(&abs.join(".gitignore")) == node.gitignore {
+                return Some((std::mem::take(&mut node.children), node.has_dotgit));
             }
+            stale_subtree = true;
         }
 
         self.cache.stats.dirs_read += 1;
@@ -237,12 +374,23 @@ impl Walk<'_, '_> {
             }
             path.extend_from_slice(&name);
             let mode = if kind == Kind::Dir { Mode::DIR } else { Mode::FILE };
-            let ignored = self
-                .stack
+            let stack = match &mut self.stack {
+                Some(s) => s,
+                None => self.stack.insert(
+                    self.repo
+                        .excludes(
+                            self.index.state,
+                            None,
+                            gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+                        )
+                        .ok()?,
+                ),
+            };
+            let ignored = stack
                 .at_entry(path.as_bstr(), Some(mode))
                 .map(|p| p.is_excluded())
                 .unwrap_or(false);
-            children.push(Child { name, kind, ignored });
+            children.push(Child { name, kind, ignored, memo: None });
         }
         let gitignore = if has_gitignore { file_key(&abs.join(".gitignore")) } else { None };
         if let Some(old) = self.cache.nodes.get(rela) {

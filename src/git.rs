@@ -4,17 +4,20 @@
 //! Status runs in-process via gitoxide (`gitnative`); `ASHELL_GIT=cli` falls
 //! back to `git --no-optional-locks status`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 
+use gix::bstr::BString;
+
 use crate::bus::BUS;
-use crate::untracked;
+use crate::gitnative::{self, Changes};
 
 pub struct Location {
     pub workdir: PathBuf,
@@ -159,16 +162,31 @@ impl Backend {
     }
 }
 
-pub fn compute_status(workdir: &Path, cache: &mut untracked::Cache) -> Option<Status> {
-    compute_status_with(workdir, Backend::from_env(), cache)
-}
-
-pub fn compute_status_with(workdir: &Path, backend: Backend, cache: &mut untracked::Cache) -> Option<Status> {
+pub fn compute_status_with(
+    workdir: &Path,
+    backend: Backend,
+    state: &mut gitnative::State,
+    changes: Changes,
+) -> Option<Status> {
     match backend {
-        Backend::Native => crate::gitnative::status(workdir, cache),
+        Backend::Native => gitnative::status(workdir, state, changes),
         Backend::Cli => cli_status(workdir),
     }
 }
+
+/// Workdir paths reported by the watcher since the last native run.
+#[derive(Default)]
+struct Dirty {
+    paths: HashSet<BString>,
+    /// Events were dropped or too many to track: next run is a full scan.
+    overflow: bool,
+}
+
+/// After this many failures in a row a repo is served by `git` only.
+const MAX_NATIVE_FAILURES: u32 = 3;
+
+/// Past this, tracking single paths costs more than a full scan.
+const MAX_DIRTY: usize = 20_000;
 
 pub(crate) fn cli_status(workdir: &Path) -> Option<Status> {
     let out = Command::new("git")
@@ -204,13 +222,18 @@ pub struct Repo {
     cv: Condvar,
     pub last_used: AtomicU64,
     head: StatCache<Option<Head>>,
-    /// Untracked-scan state, shared by the recompute and warm-up threads.
-    untracked: Arc<Mutex<untracked::Cache>>,
+    /// Native status state, shared by the recompute and warm-up threads.
+    native: Arc<Mutex<gitnative::State>>,
+    dirty: Mutex<Dirty>,
+    /// Consecutive native failures (corrupt repo, unsupported format...).
+    native_failures: AtomicU32,
     stash: StatCache<usize>,
     /// One-shot mode: no cache, compute synchronously.
     oneshot: bool,
     watching: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    #[cfg(test)]
+    seen: Mutex<Vec<PathBuf>>,
 }
 
 pub enum Freshness {
@@ -229,10 +252,14 @@ impl Repo {
             cv: Condvar::new(),
             last_used: AtomicU64::new(0),
             head: StatCache::new(),
-            untracked: Arc::new(Mutex::new(untracked::Cache::default())),
+            native: Arc::default(),
+            dirty: Mutex::default(),
+            native_failures: AtomicU32::new(0),
             stash: StatCache::new(),
             watching: AtomicBool::new(false),
             watcher: Mutex::new(None),
+            #[cfg(test)]
+            seen: Mutex::default(),
         })
     }
 
@@ -242,16 +269,45 @@ impl Repo {
         let weak = Arc::downgrade(self);
         let objects = self.loc.commondir.join("objects");
         let logs = self.loc.commondir.join("logs");
+        // FSEvents reports resolved paths (/tmp -> /private/tmp).
+        let workdir = fs::canonicalize(&self.loc.workdir).unwrap_or_else(|_| self.loc.workdir.clone());
         let w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let Ok(ev) = res else { return };
+            let Some(repo) = weak.upgrade() else { return };
+            let Ok(ev) = res else {
+                repo.dirty.lock().unwrap().overflow = true;
+                repo.invalidate();
+                return;
+            };
             let relevant = ev.paths.iter().any(|p| {
                 !p.starts_with(&objects)
                     && !p.starts_with(&logs)
                     && p.extension().is_none_or(|e| e != "lock")
             });
-            if let (true, Some(repo)) = (relevant, weak.upgrade()) {
+            {
+                let mut d = repo.dirty.lock().unwrap();
+                if ev.need_rescan() {
+                    d.overflow = true;
+                }
+                for p in &ev.paths {
+                    let rela = p.strip_prefix(&workdir).or_else(|_| p.strip_prefix(&repo.loc.workdir));
+                    let Ok(rela) = rela else { continue };
+                    if rela.starts_with(".git") || d.overflow {
+                        continue;
+                    }
+                    if let Ok(b) = gix::path::into_bstr(rela) {
+                        d.paths.insert(b.into_owned());
+                    }
+                }
+                if d.overflow || d.paths.len() > MAX_DIRTY {
+                    d.paths = HashSet::new();
+                    d.overflow = true;
+                }
+            }
+            if relevant {
                 repo.invalidate();
             }
+            #[cfg(test)]
+            repo.seen.lock().unwrap().extend(ev.paths.iter().cloned());
         });
         let Ok(mut w) = w else { return };
         if w.watch(&self.loc.workdir, RecursiveMode::Recursive).is_err() {
@@ -286,7 +342,8 @@ impl Repo {
             // No warm cache in a one-shot process: git's on-disk untracked
             // cache beats a cold native scan (aports: 85ms vs 1.5s).
             let wd = &self.loc.workdir;
-            return match cli_status(wd).or_else(|| compute_status(wd, &mut untracked::Cache::default())) {
+            let native = || compute_status_with(wd, Backend::Native, &mut Default::default(), Changes::Unknown);
+            return match cli_status(wd).or_else(native) {
                 Some(s) => (Some(Arc::new(s)), Freshness::Fresh),
                 None => (None, Freshness::Missing),
             };
@@ -327,30 +384,76 @@ impl Repo {
     /// Native status when its untracked cache is warm. While cold (first scan
     /// of aports: ~1.5s of readdir) answer with git, which has its own on-disk
     /// untracked cache, and warm ours in the background.
-    fn status_now(&self) -> Option<Status> {
-        let wd = &self.loc.workdir;
-        match self.untracked.try_lock() {
-            Ok(mut cache) if cache.is_warm() => return compute_status(wd, &mut cache),
-            Ok(cache) => {
-                drop(cache);
-                let (wd2, c) = (wd.clone(), self.untracked.clone());
+    fn status_now(self: &Arc<Self>) -> Option<Status> {
+        if self.native_failures.load(Ordering::Relaxed) >= MAX_NATIVE_FAILURES {
+            return cli_status(&self.loc.workdir);
+        }
+        match self.native.try_lock() {
+            Ok(mut st) if st.untracked.is_warm() => return self.native_run(&mut st),
+            Ok(st) => {
+                drop(st);
+                let repo = self.clone();
                 std::thread::spawn(move || {
-                    let mut cache = c.lock().unwrap();
-                    if !cache.is_warm() {
-                        compute_status(&wd2, &mut cache);
+                    // A scan that starts before the watcher can't seed
+                    // incremental runs; registering it takes a few ms.
+                    let until = Instant::now() + Duration::from_millis(200);
+                    while !repo.watching.load(Ordering::Acquire) && Instant::now() < until {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    let mut st = repo.native.lock().unwrap();
+                    if !st.untracked.is_warm() {
+                        repo.native_run(&mut st);
                     }
                 });
             }
-            Err(_) => {} // warming up
+            Err(_) => {
+                if *crate::DEBUG {
+                    eprintln!("status_now: native busy (warming up), using git");
+                }
+            }
         }
-        cli_status(wd).or_else(|| compute_status(wd, &mut self.untracked.lock().unwrap()))
+        cli_status(&self.loc.workdir).or_else(|| self.native_run(&mut self.native.lock().unwrap()))
+    }
+
+    /// Consumes the dirty set: only native runs may, so no change is lost
+    /// between them. The result is a valid baseline for the next incremental
+    /// run only if the watcher was already collecting changes.
+    fn native_run(&self, st: &mut gitnative::State) -> Option<Status> {
+        let watching = self.watching.load(Ordering::Acquire);
+        let d = std::mem::take(&mut *self.dirty.lock().unwrap());
+        let changes = if d.overflow { Changes::Unknown } else { Changes::Known(d.paths) };
+        let t = Instant::now();
+        let r = compute_status_with(&self.loc.workdir, Backend::from_env(), st, changes);
+        if *crate::DEBUG {
+            eprintln!("native_run ok={} took={:.2?} synced_before={} watching={watching} {:?}", r.is_some(), t.elapsed(), st.synced, st.stats);
+        }
+        st.synced = watching && r.is_some();
+        match r {
+            Some(_) => self.native_failures.store(0, Ordering::Relaxed),
+            None => _ = self.native_failures.fetch_add(1, Ordering::Relaxed),
+        }
+        r
+    }
+
+    /// Dev tool: recompute natively on every watcher event, printing timings.
+    pub fn watch_loop(self: &Arc<Self>) -> ! {
+        self.watch();
+        let mut seen = BUS.current();
+        loop {
+            let t = Instant::now();
+            let mut st = self.native.lock().unwrap();
+            let s = self.native_run(&mut st);
+            println!("{:>10.2?} {:?} {:?} {:?}", t.elapsed(), s, st.stats, st.untracked.stats);
+            drop(st);
+            seen = BUS.wait_past(seen, Duration::from_secs(3600));
+        }
     }
 
     pub fn last_compute(&self) -> Option<Duration> {
         self.inner.lock().unwrap().cached.as_ref().map(|c| c.took)
     }
 
-    fn recompute(&self) {
+    fn recompute(self: &Arc<Self>) {
         // Value is only as fresh as the generation observed before scanning.
         let generation = self.generation.load(Ordering::Acquire);
         let started = Instant::now();
@@ -361,6 +464,13 @@ impl Repo {
             .or_else(|| cli_status(&self.loc.workdir))
             .unwrap_or_default();
         let took = started.elapsed();
+        if *crate::DEBUG {
+            eprintln!(
+                "recompute {} gen={generation} watching={} took={took:.2?} {st:?}",
+                self.loc.workdir.display(),
+                self.watching.load(Ordering::Relaxed)
+            );
+        }
         let mut g = self.inner.lock().unwrap();
         g.cached = Some(Cached { generation, started, status: Arc::new(st), took });
         g.computing = false;
@@ -373,6 +483,45 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Incremental native status fed by the real FS watcher must equal
+    /// `git status` after every mutation, and mostly skip full passes.
+    #[test]
+    fn watcher_incremental_matches_git() {
+        use crate::gitnative::tests::{STEPS, setup};
+        let (root, r) = setup("watchtest");
+        r.sh(STEPS[0].1);
+        let repo = Repo::new(discover(&r.0).unwrap(), false);
+        repo.watch();
+        assert!(repo.watching.load(Ordering::Acquire));
+        let (mut incremental, mut full) = (Vec::new(), Vec::new());
+        let mut check = |step: &str, n: usize| {
+            // Events arrive in order: once the sentinel is seen, the step's are too.
+            let name = format!("ashell-sentinel-{n}");
+            fs::write(r.0.join(".git").join(&name), "").unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            while !repo.seen.lock().unwrap().iter().any(|p| p.ends_with(&name)) {
+                assert!(Instant::now() < until, "no FS event for {name}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let mut st = repo.native.lock().unwrap();
+            let native = repo.native_run(&mut st);
+            match st.stats.worktree_checked {
+                Some(_) => incremental.push(step.to_owned()),
+                None => full.push(step.to_owned()),
+            }
+            assert_eq!(native, cli_status(&r.0), "step: {step}");
+        };
+        check("baseline", 0);
+        for (i, (name, script)) in STEPS.iter().enumerate().skip(1) {
+            r.sh(script);
+            check(name, i);
+        }
+        eprintln!("incremental: {incremental:?}\nfull: {full:?}");
+        assert!(incremental.len() > STEPS.len() / 2, "too few incremental runs");
+        drop(repo);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn porcelain_counts() {

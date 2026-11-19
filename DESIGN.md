@@ -141,7 +141,7 @@ resolve  = ["path", "file", "spawn"]   # spawn is last resort
 |---|---|---|
 | M1 | Daemon, zsh, directory / git / status / duration / character, one-shot fallback | Frame 1 <0.5ms in `aports` warm, git never blocks |
 | M1.5 | Native git status (gitoxide + in-memory untracked cache), upgrade restart, watcher-failure fallback | Warm status < `git status` |
-| M1.6 | Watcher-dirty set: skip the per-dir stat walk, O(changed) warm status | aports warm < 10ms |
+| M1.6 | Watcher-dirty set: skip the per-dir stat walk, O(changed) warm status | aports warm < 10ms: **done**, edits 0.6-1.4ms, `git add` 17ms |
 | M2 | bash, fish, toolchains, config file + hot reload, `explain`, `bench` | |
 | M3 | Custom segments, Starship config import | |
 | M4 | nushell, PowerShell, WASM plugins | |
@@ -226,11 +226,95 @@ cache. Prompt cost in zsh unchanged: 108-135 µs.
 - macOS repos default to `core.ignoreCase=true`: index lookups must fold case
   or case-only renames show up as untracked.
 
-### Next (M1.6)
+## M1.6 status
 
-- Watcher-dirty set to skip the 12.5k dir stats (~40ms) and restat only
-  changed index entries.
-- Parallel stat walk across top-level dirs.
+Done: watcher-driven incremental git status. Each recompute costs O(what
+changed) instead of O(repo).
+
+```mermaid
+flowchart LR
+  FS[FSEvents paths] --> D[dirty set<br/>per repo]
+  D -->|taken by next native run| N[gitnative::status]
+  I[index changed?] -->|old vs new entries| N
+  N --> S[staged: cache-tree walk<br/>or cached tree index]
+  N --> W[modified: re-check touched<br/>entries only]
+  N --> U[untracked: re-stat touched dirs,<br/>memoized subtree counts]
+```
+
+- **Dirty set**: the watcher records changed workdir paths; only native runs
+  consume it, so no change is lost between them. Dropped events
+  (`need_rescan`) or >20k paths fall back to a full pass. A run seeds the next
+  incremental one only if the watcher was live when it started (warm-up waits
+  up to 200ms for it).
+- **Modified/conflicted**: kept as path sets. Re-checked entries = watcher
+  paths that are tracked (or dirs/submodules holding them) + index entries
+  that changed since last run (old vs new index diff). Calls
+  `gix_status::index_as_worktree` directly with a per-index-version cached
+  context (attributes stack, filter pipeline, submodule list): gix's
+  high-level API rebuilt it every call (~3.5ms, mostly an unused icase table).
+- **Staged**: like git, walk the index cache-tree against HEAD's trees and
+  only descend into subtrees git marked changed (nothing right after a
+  commit). Falls back to a full diff against a cached flattened HEAD tree
+  when renames could pair adds with deletes, or on conflicts/ITA/sparse.
+  This also fixed a corrupt repo (missing tree object) that git handles via
+  cache-tree and native couldn't.
+- **Untracked**: dirs not touched by the watcher skip `stat`; each child dir
+  keeps a memoized count in its parent's listing, invalidated along the
+  ancestors of changed paths and changed index entries. Changed dirs
+  revalidate their whole subtree (a dir moved out, edited and moved back).
+- **Small stuff that showed up in profiles**: HEAD tree + ahead/behind cached
+  by `stat` of HEAD, the branch/upstream loose refs and packed-refs
+  (0.4-5ms); icase tables cached per index version (2.5ms); index checksum
+  skipped (`index.skipHash`, 2.7ms of the 5.7ms read: git writes by atomic
+  rename); excludes stack built only when a dir is re-read (0.6ms).
+- After 3 consecutive native failures a repo is served by `git` only.
+- Debug: `ASHELL_DEBUG=1` logs timings/decisions, `ASHELL_LOG=<file>` keeps
+  a detached daemon's stderr, `ashell git-watch` prints every recompute.
+
+### Correctness
+
+- `tests/git-diff.sh`: **513/513 match** git, cold and warm (now also
+  `~/projects`).
+- Mutation steps grew from 22 to 42 (submodule add/content/commit, staged
+  add/delete/rename/exec bit, dir replaced by file, move dir out + edit +
+  move back, root `.gitignore` rule removal, revert edits, branch switch).
+  Run twice: full mode, and `watcher_incremental_matches_git` driving the real
+  FSEvents watcher (every step after the baseline runs incremental). In tests every cache-tree
+  staged result is also cross-checked against the full diff (24 per run).
+
+### Measured (aports clone, 23k files, warm daemon)
+
+| Operation | M1.5 recompute | M1.6 recompute | Prompt correct after (e2e) |
+|---|---|---|---|
+| new/removed untracked file | ~70 ms | 0.2-1.4 ms | 13-15 ms |
+| edit tracked file | ~70 ms | 0.6-0.8 ms | 15 ms |
+| `git add` | ~80 ms | 16-18 ms | 18 ms |
+| `git commit` | ~80 ms | 15 ms | |
+| `git reset --hard` | ~80 ms | 1.6-13 ms | 7 ms |
+| nothing changed | ~70 ms | 0.04 ms | first frame |
+
+"Prompt correct after" is zsh-side, from precmd to the frame being applied;
+FSEvents delivery is ~10ms of it. While the native cache warms after the first
+visit (~1.5s cold scan), `git` answers: ~105 ms. Full passes (no watcher):
+513 repos 3.0 s vs git 26.5 s. Daemon RSS with aports loaded: 33 MB.
+
+### Lessons
+
+- The cost moved to setup, not checks: once the walks were incremental, each
+  ~1-3ms of per-call setup (icase table, attribute stacks, tree flattening,
+  index checksum) dominated. Cache per index version.
+- git's cache-tree is the cheap answer for "what's staged" and is valid right
+  after the most common operation (commit).
+- Polling tmux to time repaints has ~50ms resolution here (process spawns
+  under EDR); timestamp inside zsh instead.
+
+### Next
+
+- First frame after a command can show the previous status for ~10-20ms
+  (FSEvents delivery). Possible fix: `FSEventStreamFlushSync` on prompt
+  requests, needs our own FSEvents binding.
+- Parallel cold scan (12.5k readdirs, 1.5s in aports) to shorten the warm-up.
+- M2.
 
 ## Risks
 

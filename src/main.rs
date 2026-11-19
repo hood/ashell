@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use engine::Engine;
+use gitnative::Changes;
 use protocol::{ENV_DEPS, Request};
 use render::Shell;
 
@@ -27,7 +28,12 @@ usage:
   ashell prompt [--shell zsh|bash|plain] [--status N] [--duration MS] [--keymap K]
   ashell explain [--status N] [--duration MS]
   ashell socket-path
-  ashell git-status [--backend native|cli] [--warm]   counts + timing, for diffing backends";
+  ashell git-status [--backend native|cli] [--warm [--trust]]   counts + timing
+  ashell git-watch    recompute on every FS event, print timings (dev)";
+
+/// `ASHELL_DEBUG=1`: timings and decisions on stderr (`ASHELL_LOG=<file>`
+/// keeps a detached daemon's).
+pub static DEBUG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("ASHELL_DEBUG").is_some());
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +71,10 @@ fn main() -> ExitCode {
             }
             Ok(())
         }
+        Some("git-watch") => match git::discover(&std::env::current_dir().unwrap_or_default()) {
+            Some(loc) => git::Repo::new(loc, false).watch_loop(),
+            None => Err("not in a git repo".into()),
+        },
         Some("git-status") => {
             let backend = match opt("--backend") {
                 Some("cli") => git::Backend::Cli,
@@ -73,15 +83,18 @@ fn main() -> ExitCode {
             let cwd = std::env::current_dir().unwrap_or_default();
             match git::discover(&cwd) {
                 Some(loc) => {
-                    let mut cache = untracked::Cache::default();
+                    let mut state = gitnative::State::default();
                     if flag("--warm") {
-                        git::compute_status_with(&loc.workdir, backend, &mut cache);
+                        git::compute_status_with(&loc.workdir, backend, &mut state, Changes::Unknown);
+                        // --warm --trust: pretend a watcher saw no changes.
+                        state.synced = flag("--trust");
                     }
+                    let changes = if flag("--trust") { Changes::Known(Default::default()) } else { Changes::Unknown };
                     let t = Instant::now();
-                    let st = git::compute_status_with(&loc.workdir, backend, &mut cache);
+                    let st = git::compute_status_with(&loc.workdir, backend, &mut state, changes);
                     let took = t.elapsed();
-                    if std::env::var_os("ASHELL_DEBUG").is_some() {
-                        eprintln!("{:?}", cache.stats);
+                    if *DEBUG {
+                        eprintln!("{:?} {:?}", state.stats, state.untracked.stats);
                     }
                     match st {
                         Some(s) => {
