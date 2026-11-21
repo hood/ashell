@@ -7,6 +7,8 @@ BIG=${1:-}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ashell-e2e.XXXX")
 LOGD=$(mktemp -d "${TMPDIR:-/tmp}/ashell-e2e-log.XXXX")
 ZLOG=$LOGD/zsh.log
+# Defaults regardless of the user's config (the tmux server inherits this).
+export ASHELL_CONFIG=$LOGD/config.toml
 t() { tmux -L ashell-test "$@"; }
 line() { t capture-pane -p -t e2e | grep -v '^$' | tail -1; }
 step() { t send-keys -t e2e "$1" Enter; sleep "$2"; printf '%-34s | %s\n' "$3" "$(line)"; }
@@ -84,6 +86,16 @@ waitfor "echo 1.2.3 > ../rust-toolchain" 'v1.2.3' "rust-toolchain pin in parent"
 waitfor "rm ../rust-toolchain" 'v1.0.0' "pin removed"
 waitfor "export VIRTUAL_ENV=$TC/py/.venv; cd $TC/py" '(py)' "python venv"
 step "unset VIRTUAL_ENV; cd $WORK" 0.3 "back"
+
+# Config is read when the daemon starts: change it, stop the daemon.
+printf 'right = []\n[character]\nsuccess_symbol = "$"\n' > "$ASHELL_CONFIG"
+step "$B stop" 0.4 "config written + ashell stop"
+step "true" 0.4 "next prompt: new daemon"
+printf '[character]\nsucess_symbol = "$"\n' > "$ASHELL_CONFIG"
+step "$B stop" 0.4 "broken config + ashell stop"
+step "true" 0.4 "warning segment, defaults"
+rm -f "$ASHELL_CONFIG"
+step "$B stop" 0.4 "config removed + ashell stop"
 
 if [ -n "$BIG" ]; then
   waitpatch "cd $BIG" "big repo cold"

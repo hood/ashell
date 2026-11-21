@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::bus::BUS;
+use crate::config;
 use crate::protocol::{ENV_DEPS, Request};
 use crate::render::Line;
 
@@ -415,14 +416,14 @@ impl Toolchains {
     /// stats, off the render path) if a command ran since the last check or
     /// it is older than `RECHECK_AFTER`. Render path: a stat of cwd plus map
     /// lookups.
-    pub fn start(self: &Arc<Self>, req: &Request, since: Instant) -> Started {
+    pub fn start(self: &Arc<Self>, req: &Request, since: Instant, cfg: &config::Toolchains) -> Started {
         let cwd = PathBuf::from(&req.cwd);
         let tools = self.detected(&cwd, req);
         let mut h = std::hash::DefaultHasher::new();
         req.env.hash(&mut h);
         let env_hash = h.finish();
         let mut out = Vec::with_capacity(tools.len());
-        for &tool in tools.iter() {
+        for &tool in tools.iter().filter(|&&t| cfg.enabled(TOOLS[t].name)) {
             let entry = {
                 let mut m = self.entries.lock().unwrap();
                 if m.len() >= MAX_ENTRIES {
@@ -475,7 +476,14 @@ impl Toolchains {
     /// Renders started tools. Unknown versions are waited for until `until`
     /// (None: forever); known ones render at once while revalidating.
     /// Returns true if some validation is still running.
-    pub fn render(&self, l: &mut Line, started: &Started, req: &Request, until: Option<Instant>) -> bool {
+    pub fn render(
+        &self,
+        l: &mut Line,
+        started: &Started,
+        req: &Request,
+        until: Option<Instant>,
+        cfg: &config::Toolchains,
+    ) -> bool {
         let mut pending = false;
         for (tool, entry) in &started.0 {
             let mut s = entry.slot.lock().unwrap();
@@ -493,21 +501,24 @@ impl Toolchains {
             }
             pending |= s.computing;
             let t = &TOOLS[*tool];
+            let over = cfg.tool(t.name);
+            let symbol = over.and_then(|o| o.symbol.as_deref()).unwrap_or(t.symbol);
+            let color = over.and_then(|o| o.style.as_ref()).map_or(t.color, |s| s.0.as_str());
             let version = s.value.as_ref().and_then(|v| v.as_deref());
             let mut text = match version {
-                Some(v) => format!("{}v{v}", t.symbol),
+                Some(v) => format!("{symbol}{}{v}", cfg.version_prefix),
                 None => String::new(),
             };
             if t.name == "python"
                 && let Some(venv) = venv_name(req)
             {
                 if text.is_empty() {
-                    text.push_str(t.symbol.trim_end());
+                    text.push_str(symbol.trim_end());
                 }
                 text.push_str(&format!(" ({venv})"));
             }
             if !text.is_empty() {
-                l.seg(t.color, &text);
+                l.seg(color, &text);
             }
         }
         pending
@@ -653,7 +664,8 @@ mod tests {
 
     /// The prompt after revalidation settles (what the patch frame shows).
     fn shown(tc: &Arc<Toolchains>, req: &Request) -> String {
-        let started = tc.start(req, Instant::now());
+        let cfg = config::Toolchains::default();
+        let started = tc.start(req, Instant::now(), &cfg);
         for (_, e) in &started.0 {
             let mut s = e.slot.lock().unwrap();
             while s.computing {
@@ -661,7 +673,7 @@ mod tests {
             }
         }
         let mut l = Line::new(crate::render::Shell::Plain);
-        assert!(!tc.render(&mut l, &started, req, None));
+        assert!(!tc.render(&mut l, &started, req, None, &cfg));
         l.buf
     }
 

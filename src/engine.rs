@@ -6,17 +6,20 @@ use std::time::{Duration, Instant};
 
 use crate::git::{self, Freshness, Head, Repo};
 use crate::protocol::Request;
-use crate::render::{Line, Shell, sgr};
+use crate::config::{self, Config, Segment};
+use crate::render::{Line, Shell};
 use crate::toolchain::Toolchains;
 
 const MAX_REPOS: usize = 32;
-const BRANCH_GLYPH: &str = "\u{e0a0} ";
 
 pub struct Engine {
     oneshot: bool,
     repos: Mutex<HashMap<PathBuf, Arc<Repo>>>,
     tick: AtomicU64,
     toolchains: Arc<Toolchains>,
+    config: Arc<Config>,
+    /// Set when the config file is broken (defaults in use).
+    config_error: Option<String>,
 }
 
 pub struct Rendered {
@@ -30,8 +33,15 @@ pub struct Rendered {
 }
 
 impl Engine {
-    pub fn new(oneshot: bool) -> Self {
-        Self { oneshot, repos: Mutex::new(HashMap::new()), tick: AtomicU64::new(0), toolchains: Arc::default() }
+    pub fn new(oneshot: bool, config: Config, config_error: Option<String>) -> Self {
+        Self {
+            oneshot,
+            repos: Mutex::new(HashMap::new()),
+            tick: AtomicU64::new(0),
+            toolchains: Arc::default(),
+            config: Arc::new(config),
+            config_error,
+        }
     }
 
     fn repo(&self, loc: git::Location) -> Arc<Repo> {
@@ -65,6 +75,7 @@ impl Engine {
     /// state. `deadline`: total wait for async segments (shared).
     pub fn render(&self, req: &Request, deadline: Duration, since: Instant, shell: Shell) -> Rendered {
         let until = Instant::now().checked_add(deadline);
+        let cfg = &*self.config;
         let mut timings = Vec::new();
         let mut t = Instant::now();
         let mut lap = |name, timings: &mut Vec<_>| {
@@ -72,35 +83,56 @@ impl Engine {
             timings.push((name, now - t));
             t = now;
         };
+        let uses = |s: Segment| cfg.left.contains(&s) || cfg.right.contains(&s);
 
         let cwd = Path::new(&req.cwd);
-        let repo = git::discover(cwd).map(|l| self.repo(l));
+        let need_repo = uses(Segment::Git) || (uses(Segment::Directory) && cfg.directory.repo_relative);
+        let repo = need_repo.then(|| git::discover(cwd).map(|l| self.repo(l))).flatten();
         lap("discover", &mut timings);
         // Kick toolchain revalidation first so it overlaps the git wait.
-        let tools = self.toolchains.start(req, since);
+        let tools = uses(Segment::Toolchains).then(|| self.toolchains.start(req, since, &cfg.toolchains));
         lap("toolchains kick", &mut timings);
 
-        let mut left = Line::new(shell);
-        let home = req.env("HOME").map(str::to_owned).or_else(|| std::env::var("HOME").ok());
-        directory(&mut left, cwd, home.as_deref(), repo.as_deref());
-        lap("directory", &mut timings);
-
         let mut pending = false;
-        if let Some(r) = &repo {
-            let left_time = until.map_or(Duration::MAX, |u| u.saturating_duration_since(Instant::now()));
-            pending = git_segment(&mut left, r, left_time, since);
-            lap("git", &mut timings);
+        let mut lines = [Line::new(shell), Line::new(shell)];
+        if self.config_error.is_some() {
+            lines[0].seg("1;33", "⚠ config"); // details: `ashell config check`
         }
-        pending |= self.toolchains.render(&mut left, &tools, req, until);
-        lap("toolchains", &mut timings);
-
-        character(&mut left, req);
-        left.raw(" ");
-
-        let mut right = Line::new(shell);
-        duration(&mut right, req);
-        status(&mut right, req);
-        lap("right", &mut timings);
+        for (i, side) in [&cfg.left, &cfg.right].into_iter().enumerate() {
+            let l = &mut lines[i];
+            for seg in side {
+                match seg {
+                    Segment::Directory => {
+                        let r = repo.as_deref().filter(|_| cfg.directory.repo_relative);
+                        let home = req.env("HOME").map(str::to_owned).or_else(|| std::env::var("HOME").ok());
+                        directory(l, &cfg.directory, cwd, home.as_deref(), r);
+                        lap("directory", &mut timings);
+                    }
+                    Segment::Git => {
+                        if let Some(r) = &repo {
+                            let left_time =
+                                until.map_or(Duration::MAX, |u| u.saturating_duration_since(Instant::now()));
+                            pending |= git_segment(l, &cfg.git, r, left_time, since);
+                            lap("git", &mut timings);
+                        }
+                    }
+                    Segment::Toolchains => {
+                        if let Some(started) = &tools {
+                            pending |= self.toolchains.render(l, started, req, until, &cfg.toolchains);
+                            lap("toolchains", &mut timings);
+                        }
+                    }
+                    Segment::Character => character(l, &cfg.character, req),
+                    Segment::Duration => duration(l, &cfg.duration, req),
+                    Segment::Status => status(l, &cfg.status, req),
+                }
+            }
+        }
+        let [mut left, right] = lines;
+        if !left.buf.is_empty() {
+            left.raw(" ");
+        }
+        lap("rest", &mut timings);
 
         Rendered { left: left.buf, right: right.buf, pending, watchable: repo.is_some(), timings }
     }
@@ -111,8 +143,7 @@ impl Engine {
     }
 }
 
-fn directory(l: &mut Line, cwd: &Path, home: Option<&str>, repo: Option<&Repo>) {
-    const KEEP: usize = 4;
+fn directory(l: &mut Line, cfg: &config::Directory, cwd: &Path, home: Option<&str>, repo: Option<&Repo>) {
     let shown: String = match repo {
         Some(r) => {
             let name = r.loc.workdir.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
@@ -123,76 +154,85 @@ fn directory(l: &mut Line, cwd: &Path, home: Option<&str>, repo: Option<&Repo>) 
             }
         }
         None => match home.and_then(|h| cwd.strip_prefix(h).ok()) {
-            Some(rel) if rel.as_os_str().is_empty() => "~".into(),
-            Some(rel) => format!("~/{}", rel.display()),
+            Some(rel) if rel.as_os_str().is_empty() => cfg.home_symbol.clone(),
+            Some(rel) => format!("{}/{}", cfg.home_symbol, rel.display()),
             None => cwd.display().to_string(),
         },
     };
     let parts: Vec<&str> = shown.split('/').collect();
-    if parts.len() > KEEP {
-        l.seg(sgr::DIR, &format!("…/{}", parts[parts.len() - KEEP..].join("/")));
+    let keep = cfg.truncate;
+    if keep > 0 && parts.len() > keep {
+        l.seg(&cfg.style.0, &format!("{}{}", cfg.truncation_symbol, parts[parts.len() - keep..].join("/")));
     } else {
-        l.seg(sgr::DIR, &shown);
+        l.seg(&cfg.style.0, &shown);
     }
 }
 
 /// Returns true when the status part is still pending.
-fn git_segment(l: &mut Line, repo: &Arc<Repo>, deadline: Duration, since: Instant) -> bool {
+fn git_segment(l: &mut Line, cfg: &config::Git, repo: &Arc<Repo>, deadline: Duration, since: Instant) -> bool {
     match repo.head() {
-        Some(Head::Branch(b)) => l.seg(sgr::BRANCH, &format!("{BRANCH_GLYPH}{b}")),
-        Some(Head::Detached(h)) => l.seg(sgr::BRANCH, &format!("{BRANCH_GLYPH}@{h}")),
+        Some(Head::Branch(b)) => l.seg(&cfg.branch_style.0, &format!("{}{b}", cfg.branch_symbol)),
+        Some(Head::Detached(h)) => {
+            l.seg(&cfg.branch_style.0, &format!("{}{}{h}", cfg.branch_symbol, cfg.detached_prefix))
+        }
         None => return false,
     }
     let (st, fresh) = repo.status(deadline, since);
     let stale = !matches!(fresh, Freshness::Fresh);
     let Some(st) = st else {
-        l.seg(sgr::DIM, "…");
+        l.seg(&cfg.stale_style.0, &cfg.pending_symbol);
         return true;
     };
-    let mut parts: Vec<(&str, String)> = Vec::new();
-    let mut add = |n: u32, sym: &str, color| {
-        if n > 0 {
-            parts.push((color, format!("{sym}{n}")));
-        }
-    };
-    add(st.conflicted, "=", sgr::CONFLICT);
-    add(st.staged, "+", sgr::STAGED);
-    add(st.modified, "!", sgr::MODIFIED);
-    add(st.untracked, "?", sgr::UNTRACKED);
-    add(st.ahead, "⇡", sgr::SYNC);
-    add(st.behind, "⇣", sgr::SYNC);
     let stash = repo.stash_count() as u32;
-    add(stash, "*", sgr::STASH);
-    for (i, (color, text)) in parts.iter().enumerate() {
-        let c = if stale { sgr::DIM } else { color };
-        if i == 0 { l.seg(c, text) } else { l.styled(c, text) }
+    let marks = [
+        (st.conflicted, &cfg.conflicted, &cfg.conflicted_style),
+        (st.staged, &cfg.staged, &cfg.staged_style),
+        (st.modified, &cfg.modified, &cfg.modified_style),
+        (st.untracked, &cfg.untracked, &cfg.untracked_style),
+        (st.ahead, &cfg.ahead, &cfg.sync_style),
+        (st.behind, &cfg.behind, &cfg.sync_style),
+        (stash, &cfg.stash, &cfg.stash_style),
+    ];
+    let mut first = true;
+    for (n, sym, style) in marks {
+        if n == 0 {
+            continue;
+        }
+        let style = if stale { &cfg.stale_style } else { style };
+        let text = format!("{sym}{n}");
+        if first { l.seg(&style.0, &text) } else { l.styled(&style.0, &text) }
+        first = false;
     }
     stale
 }
 
-fn character(l: &mut Line, req: &Request) {
-    let sym = if req.keymap == "vicmd" { "❮" } else { "❯" };
-    l.seg(if req.status == 0 { sgr::OK } else { sgr::ERR }, sym);
+fn character(l: &mut Line, cfg: &config::Character, req: &Request) {
+    let (sym, style) = match (req.keymap == "vicmd", req.status == 0) {
+        (true, ok) => (&cfg.vicmd_symbol, if ok { &cfg.success_style } else { &cfg.error_style }),
+        (false, true) => (&cfg.success_symbol, &cfg.success_style),
+        (false, false) => (&cfg.error_symbol, &cfg.error_style),
+    };
+    l.seg(&style.0, sym);
 }
 
-fn duration(l: &mut Line, req: &Request) {
-    let Some(ms) = req.duration_ms.filter(|&ms| ms >= 2000) else { return };
+fn duration(l: &mut Line, cfg: &config::Duration, req: &Request) {
+    let Some(ms) = req.duration_ms.filter(|&ms| ms >= cfg.min_ms) else { return };
     let s = ms / 1000;
     let text = match s {
         0..60 => format!("{}.{}s", s, (ms % 1000) / 100),
         60..3600 => format!("{}m{}s", s / 60, s % 60),
         _ => format!("{}h{}m", s / 3600, (s % 3600) / 60),
     };
-    l.seg(sgr::DURATION, &text);
+    l.seg(&cfg.style.0, &text);
 }
 
-fn status(l: &mut Line, req: &Request) {
+fn status(l: &mut Line, cfg: &config::Status, req: &Request) {
     if req.status != 0 {
         let text = match req.status {
             130 => "INT".to_owned(),
             n if n > 128 => format!("SIG{}", n - 128),
             n => n.to_string(),
         };
-        l.seg(sgr::ERR, &text);
+        l.seg(&cfg.style.0, &text);
     }
 }

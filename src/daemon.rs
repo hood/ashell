@@ -45,7 +45,12 @@ pub fn run(sock: &Path) -> io::Result<()> {
     fs::set_permissions(sock, fs::Permissions::from_mode(0o600))?;
 
     exit_on_upgrade(sock.to_path_buf());
-    let engine = Arc::new(Engine::new(false));
+    // Read once: `ashell stop` applies config changes.
+    let (config, err) = crate::config::Config::load();
+    if let Some(e) = &err {
+        eprintln!("config: {e} (using defaults)");
+    }
+    let engine = Arc::new(Engine::new(false, config, err));
     let me = unsafe { libc::getuid() };
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };

@@ -1,4 +1,5 @@
 mod bus;
+mod config;
 mod daemon;
 mod engine;
 mod git;
@@ -28,6 +29,7 @@ usage:
   ashell stop [--socket P]
   ashell prompt [--shell zsh|bash|plain] [--status N] [--duration MS] [--keymap K]
   ashell explain [--status N] [--duration MS]
+  ashell config path|check|default      config file location, validate it, print defaults
   ashell socket-path
   ashell git-status [--backend native|cli] [--warm [--trust]]   counts + timing
   ashell git-watch    recompute on every FS event, print timings (dev)";
@@ -65,7 +67,8 @@ fn main() -> ExitCode {
         }
         Some("prompt") => {
             let shell = opt("--shell").and_then(Shell::parse).unwrap_or(Shell::Plain);
-            let r = Engine::new(true).render(&local_request(opt), Duration::MAX, Instant::now(), shell);
+            let (config, err) = config::Config::load();
+            let r = Engine::new(true, config, err).render(&local_request(opt), Duration::MAX, Instant::now(), shell);
             match shell {
                 Shell::Plain => println!("{}\n{}", r.left, r.right),
                 _ => print!("{}\x1f{}", r.left, r.right),
@@ -112,6 +115,7 @@ fn main() -> ExitCode {
                 None => Err("not in a git repo".into()),
             }
         }
+        Some("config") => config_cmd(args.get(1).map(String::as_str)),
         Some("explain") => {
             explain(local_request(opt));
             Ok(())
@@ -142,7 +146,11 @@ fn local_request<'a>(opt: impl Fn(&str) -> Option<&'a str>) -> Request {
 /// Renders twice through a daemon-mode engine (cold, then warm) and prints
 /// per-segment timings.
 fn explain(req: Request) {
-    let engine = Engine::new(false);
+    let (config, err) = config::Config::load();
+    if let Some(e) = &err {
+        println!("config error, using defaults: {e}\n");
+    }
+    let engine = Engine::new(false, config, err);
     let since = Instant::now();
     let t = Instant::now();
     let cold = engine.render(&req, Duration::ZERO, since, Shell::Plain);
@@ -189,6 +197,36 @@ fn explain(req: Request) {
         println!("git status (async, off critical path): {d:.1?}");
     }
     println!("\n{}   {}", warm.left, warm.right);
+}
+
+fn config_cmd(sub: Option<&str>) -> Result<(), String> {
+    let path = config::Config::path();
+    match sub {
+        Some("path") => {
+            println!("{}", path.map(|p| p.display().to_string()).unwrap_or_default());
+            Ok(())
+        }
+        Some("default") => {
+            print!("{}", config::DEFAULT_TOML);
+            Ok(())
+        }
+        Some("check") => {
+            let Some(path) = path else { return Err("no config path (HOME unset)".into()) };
+            match std::fs::read_to_string(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("{}: not found, using defaults", path.display());
+                    Ok(())
+                }
+                Err(e) => Err(format!("{}: {e}", path.display())),
+                Ok(text) => {
+                    config::Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                    println!("{}: ok (running daemon picks it up after `ashell stop`)", path.display());
+                    Ok(())
+                }
+            }
+        }
+        _ => Err("usage: ashell config path|check|default".into()),
+    }
 }
 
 fn shell_quote(s: &str) -> String {

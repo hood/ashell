@@ -142,7 +142,7 @@ resolve  = ["path", "file", "spawn"]   # spawn is last resort
 | M1 | Daemon, zsh, directory / git / status / duration / character, one-shot fallback | Frame 1 <0.5ms in `aports` warm, git never blocks |
 | M1.5 | Native git status (gitoxide + in-memory untracked cache), upgrade restart, watcher-failure fallback | Warm status < `git status` |
 | M1.6 | Watcher-dirty set: skip the per-dir stat walk, O(changed) warm status | aports warm < 10ms: **done**, edits 0.6-1.4ms, `git add` 17ms |
-| M2 | Toolchains (**done**), config file + hot reload, `explain`, `bench`; bash and fish last | |
+| M2 | Toolchains (**done**), config file (**done**, no hot reload: `ashell stop`), `explain`, `bench`; bash and fish last | |
 | M3 | Custom segments, Starship config import | |
 | M4 | nushell, PowerShell, WASM plugins | |
 
@@ -364,10 +364,32 @@ since M1. Now sliced by length. Per prompt (`bench/precmd.zsh`, run with
   prompt +31ms after it (a tool run), removing it +0.7ms (cached key), venv
   name in the first frame.
 
+## M2 status: config file
+
+`$ASHELL_CONFIG`, else `$XDG_CONFIG_HOME/ashell/config.toml`, else
+`~/.config/ashell/config.toml`. TOML, every key optional.
+
+- Layout: `left` / `right` segment lists (order; leaving one out disables
+  it and skips its work, e.g. no toolchain runs).
+- Per segment: symbols and styles for directory (truncation, home symbol,
+  repo-relative), git (branch symbol, each status mark), toolchains
+  (version prefix; per tool `disabled` / `symbol` / `style`), character,
+  duration (`min_ms`), status.
+- Styles parse Starship-like words: `bold cyan`, `bright-red`, `fg:208`,
+  `bg:#1e1e2e`, `none`.
+- Unknown keys, bad styles, unknown segments or tools are errors. A broken
+  file falls back to defaults and the prompt shows `⚠ config`;
+  `ashell config check` prints the error with line and valid keys.
+- `ashell config default` prints a documented file; a test keeps it equal
+  to the built-in defaults.
+- Read once at daemon start, no hot reload: `ashell stop` applies changes
+  (the fallback prompt right after already reads the new file).
+- Default config renders byte-identical prompts to before (35/35 cases:
+  7 dirs x status / duration / vicmd / zsh escapes).
+
 ### Next
 
 - Scala version from `build.sbt` (`scalaVersion`), no JVM start.
-- Config file + hot reload (enable/disable/format segments).
 
 ## Risks
 

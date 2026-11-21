@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
 gix = { version = "0.90", default-features = false, features = ["status", "revision", "parallel", "sha1", "max-performance"] }
 

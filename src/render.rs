@@ -18,22 +18,6 @@ impl Shell {
     }
 }
 
-/// SGR parameter strings, e.g. "1;36".
-pub mod sgr {
-    pub const DIR: &str = "1;36";
-    pub const BRANCH: &str = "35";
-    pub const STAGED: &str = "32";
-    pub const MODIFIED: &str = "33";
-    pub const UNTRACKED: &str = "34";
-    pub const CONFLICT: &str = "31";
-    pub const SYNC: &str = "36";
-    pub const STASH: &str = "37";
-    pub const DIM: &str = "2";
-    pub const OK: &str = "1;32";
-    pub const ERR: &str = "1;31";
-    pub const DURATION: &str = "33";
-}
-
 /// Builds one prompt line with shell-specific zero-width escapes.
 ///
 /// zsh: content lands in a variable expanded under `prompt_subst`, so only `%`
@@ -61,6 +45,10 @@ impl Line {
     /// Styled text glued to whatever came before.
     pub fn styled(&mut self, sgr: &str, text: &str) {
         self.empty = false;
+        if sgr.is_empty() {
+            self.text(text); // style "none"
+            return;
+        }
         self.esc(sgr);
         self.text(text);
         self.esc("0");
