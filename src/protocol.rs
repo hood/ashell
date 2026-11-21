@@ -14,8 +14,22 @@ pub const US: u8 = 0x1f;
 pub const RS: u8 = 0x1e;
 pub const PROTO: &str = "1";
 
-/// Env vars segments read. Clients send their values with every request.
-pub const ENV_DEPS: &[&str] = &["HOME"];
+/// Env vars segments read. Clients send their values with every request;
+/// empty means unset. Toolchain vars select versions (shims, venvs).
+pub const ENV_DEPS: &[&str] = &[
+    "HOME",
+    "PATH",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "PYENV_VERSION",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_HOME",
+    "VOLTA_HOME",
+    "GOTOOLCHAIN",
+    "GOROOT",
+    "RBENV_VERSION",
+    "JAVA_HOME",
+];
 
 #[derive(Clone, Debug, Default)]
 pub struct Request {

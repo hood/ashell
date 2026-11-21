@@ -32,7 +32,9 @@ _ashell_next_frame() {
     _ashell_buf+=$chunk
   done
   _ashell_frame=${_ashell_buf%%$_ashell_rs*}
-  _ashell_buf=${_ashell_buf#*$_ashell_rs}
+  # Not ${buf#*$rs}: a leading-* shortest match is quadratic in zsh
+  # (19µs for a short frame, 55µs for a long one).
+  _ashell_buf=${_ashell_buf[${#_ashell_frame}+2,-1]}
 }
 
 _ashell_send() {

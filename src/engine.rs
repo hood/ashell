@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::git::{self, Freshness, Head, Repo};
 use crate::protocol::Request;
 use crate::render::{Line, Shell, sgr};
+use crate::toolchain::Toolchains;
 
 const MAX_REPOS: usize = 32;
 const BRANCH_GLYPH: &str = "\u{e0a0} ";
@@ -15,6 +16,7 @@ pub struct Engine {
     oneshot: bool,
     repos: Mutex<HashMap<PathBuf, Arc<Repo>>>,
     tick: AtomicU64,
+    toolchains: Arc<Toolchains>,
 }
 
 pub struct Rendered {
@@ -29,7 +31,7 @@ pub struct Rendered {
 
 impl Engine {
     pub fn new(oneshot: bool) -> Self {
-        Self { oneshot, repos: Mutex::new(HashMap::new()), tick: AtomicU64::new(0) }
+        Self { oneshot, repos: Mutex::new(HashMap::new()), tick: AtomicU64::new(0), toolchains: Arc::default() }
     }
 
     fn repo(&self, loc: git::Location) -> Arc<Repo> {
@@ -59,8 +61,10 @@ impl Engine {
         r
     }
 
-    /// `since`: when the prompt was requested; bounds freshness of unwatched state.
+    /// `since`: when the prompt was requested; bounds freshness of unwatched
+    /// state. `deadline`: total wait for async segments (shared).
     pub fn render(&self, req: &Request, deadline: Duration, since: Instant, shell: Shell) -> Rendered {
+        let until = Instant::now().checked_add(deadline);
         let mut timings = Vec::new();
         let mut t = Instant::now();
         let mut lap = |name, timings: &mut Vec<_>| {
@@ -72,6 +76,9 @@ impl Engine {
         let cwd = Path::new(&req.cwd);
         let repo = git::discover(cwd).map(|l| self.repo(l));
         lap("discover", &mut timings);
+        // Kick toolchain revalidation first so it overlaps the git wait.
+        let tools = self.toolchains.start(req, since);
+        lap("toolchains kick", &mut timings);
 
         let mut left = Line::new(shell);
         let home = req.env("HOME").map(str::to_owned).or_else(|| std::env::var("HOME").ok());
@@ -80,9 +87,12 @@ impl Engine {
 
         let mut pending = false;
         if let Some(r) = &repo {
-            pending = git_segment(&mut left, r, deadline, since);
+            let left_time = until.map_or(Duration::MAX, |u| u.saturating_duration_since(Instant::now()));
+            pending = git_segment(&mut left, r, left_time, since);
             lap("git", &mut timings);
         }
+        pending |= self.toolchains.render(&mut left, &tools, req, until);
+        lap("toolchains", &mut timings);
 
         character(&mut left, req);
         left.raw(" ");

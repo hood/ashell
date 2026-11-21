@@ -4,8 +4,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::bus::BUS;
@@ -66,6 +66,20 @@ struct Session {
     seq: AtomicU64,
     shell: Mutex<Shell>,
     out: Mutex<UnixStream>,
+    /// Latest prompt that needs patch frames, for the session's follower.
+    job: Mutex<Option<Job>>,
+    job_cv: Condvar,
+    closed: AtomicBool,
+}
+
+/// A prompt whose frame 1 may still change (pending segments, late events).
+struct Job {
+    req: Request,
+    shell: Shell,
+    t0: Instant,
+    pending: bool,
+    left: String,
+    right: String,
 }
 
 impl Session {
@@ -81,7 +95,22 @@ fn serve(stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()
         seq: AtomicU64::new(0),
         shell: Mutex::new(Shell::Plain),
         out: Mutex::new(stream.try_clone()?),
+        job: Mutex::new(None),
+        job_cv: Condvar::new(),
+        closed: AtomicBool::new(false),
     });
+    // One long-lived follower per session: spawning a thread per prompt
+    // cost ~100µs of the connection thread's time with toolchains on.
+    let (s, e) = (session.clone(), engine.clone());
+    std::thread::spawn(move || follower(&s, &e));
+    let r = read_loop(&session, stream, engine, sock);
+    session.closed.store(true, Ordering::Release);
+    session.job_cv.notify_all();
+    BUS.bump();
+    r
+}
+
+fn read_loop(session: &Arc<Session>, stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()> {
     let mut rd = BufReader::new(stream);
     let mut rec = Vec::with_capacity(512);
     let mut buf = Vec::with_capacity(64);
@@ -109,8 +138,10 @@ fn serve(stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()
                 }
                 session.send_frame(req.seq, !r.pending, &r.left, &r.right)?;
                 if r.pending || (r.watchable && req.ran_command()) {
-                    let (s, e) = (session.clone(), engine.clone());
-                    std::thread::spawn(move || follow_up(s, e, req, shell, t0, r.pending, r.left, r.right));
+                    let (pending, left, right) = (r.pending, r.left, r.right);
+                    *session.job.lock().unwrap() = Some(Job { req, shell, t0, pending, left, right });
+                    session.job_cv.notify_one();
+                    BUS.bump(); // wakes a follow-up still waiting on the previous prompt
                 }
             }
             Some(Msg::Quit) => {
@@ -122,21 +153,33 @@ fn serve(stream: UnixStream, engine: &Arc<Engine>, sock: &Path) -> io::Result<()
     }
 }
 
+fn follower(s: &Arc<Session>, engine: &Arc<Engine>) {
+    loop {
+        let job = {
+            let mut g = s.job.lock().unwrap();
+            loop {
+                if s.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(j) = g.take() {
+                    break j;
+                }
+                g = s.job_cv.wait(g).unwrap();
+            }
+        };
+        follow_up(s, engine, job);
+    }
+}
+
 /// Re-renders on every bus event until nothing is pending and the grace window
 /// is over, pushing a frame whenever the output changes.
-#[allow(clippy::too_many_arguments)]
-fn follow_up(
-    s: Arc<Session>,
-    engine: Arc<Engine>,
-    req: Request,
-    shell: Shell,
-    t0: Instant,
-    mut pending: bool,
-    mut left: String,
-    mut right: String,
-) {
+fn follow_up(s: &Session, engine: &Engine, job: Job) {
+    let Job { req, shell, t0, mut pending, mut left, mut right } = job;
     let mut seen = BUS.current();
     loop {
+        if s.closed.load(Ordering::Acquire) {
+            return;
+        }
         let end = t0 + if pending { HARD_LIMIT } else { GRACE };
         let now = Instant::now();
         if now >= end {

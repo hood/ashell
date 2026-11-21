@@ -142,7 +142,7 @@ resolve  = ["path", "file", "spawn"]   # spawn is last resort
 | M1 | Daemon, zsh, directory / git / status / duration / character, one-shot fallback | Frame 1 <0.5ms in `aports` warm, git never blocks |
 | M1.5 | Native git status (gitoxide + in-memory untracked cache), upgrade restart, watcher-failure fallback | Warm status < `git status` |
 | M1.6 | Watcher-dirty set: skip the per-dir stat walk, O(changed) warm status | aports warm < 10ms: **done**, edits 0.6-1.4ms, `git add` 17ms |
-| M2 | bash, fish, toolchains, config file + hot reload, `explain`, `bench` | |
+| M2 | Toolchains (**done**), config file + hot reload, `explain`, `bench`; bash and fish last | |
 | M3 | Custom segments, Starship config import | |
 | M4 | nushell, PowerShell, WASM plugins | |
 
@@ -315,6 +315,59 @@ visit (~1.5s cold scan), `git` answers: ~105 ms. Full passes (no watcher):
   requests, needs our own FSEvents binding.
 - Parallel cold scan (12.5k readdirs, 1.5s in aports) to shorten the warm-up.
 - M2.
+
+## M2 status: toolchain segments
+
+Done: rust, node, python (+ venv name), go, ruby, java, bun, deno. Detected
+like Starship (marker files, extensions, dirs in cwd; python also on
+`VIRTUAL_ENV`), version from running the tool once.
+
+- **Render path**: one `stat` of cwd (cached listing), map lookups. A known
+  version renders at once; unknown ones wait within the shared 3ms deadline
+  (git and toolchains overlap) and patch when the tool answers.
+- **Version key**: resolved binary on the shell's PATH + its stat, pin files
+  in cwd and ancestors (`rust-toolchain(.toml)`, `.nvmrc`, `.node-version`,
+  `.python-version`, `go.mod`, `.ruby-version`, `.java-version`,
+  `.tool-versions`, `mise.toml`...), global defaults (rustup settings and
+  toolchains dir, pyenv/rbenv version, `~/.tool-versions`, mise config), env
+  (`RUSTUP_TOOLCHAIN`, `VIRTUAL_ENV`, `JAVA_HOME`...). The tool runs again
+  only when the key changes, or after 30 min (in-place upgrades behind
+  shims). Runs use the shell's env, cwd, 5s timeout, on a 4-thread pool.
+- **Revalidation** (key check, 40-70µs of stats, off the render path): after
+  a command ran, or when the last check is >5s old. An empty enter reuses it.
+- The shell now sends 12 env vars per prompt (was `HOME` only).
+- macOS `/usr/bin/java` without a JDK opens an install dialog: skipped.
+- Daemon: one long-lived follow-up thread per session instead of a thread
+  per prompt.
+
+### zsh client fix
+
+`${buf#*$rs}` (drop the parsed frame from the read buffer) is quadratic in
+zsh: 19µs for a short frame, 55µs for a long one. It was on every prompt
+since M1. Now sliced by length. Per prompt (`bench/precmd.zsh`, run with
+`zsh -fi`):
+
+| Dir | Before | After |
+|---|---|---|
+| no repo | 121 µs | 110 µs |
+| aports (git) | 137 µs | 115 µs |
+| rust repo (git + toolchain) | 209 µs | 125 µs |
+| java service (git + toolchain) | 214 µs | 127 µs |
+
+### Tests
+
+- Unit: parsers for every tool's real output, detection, env deps sent by
+  the shell, venv naming; a fake rustup-like `rustc` checks re-runs only on
+  key changes (pin in ancestor, binary replaced, other PATH entry, missing
+  tool, marker removed).
+- e2e: fake `rustc` on PATH in zsh: version shown, parent pin patches the
+  prompt +31ms after it (a tool run), removing it +0.7ms (cached key), venv
+  name in the first frame.
+
+### Next
+
+- Scala version from `build.sbt` (`scalaVersion`), no JVM start.
+- Config file + hot reload (enable/disable/format segments).
 
 ## Risks
 

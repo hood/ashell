@@ -66,6 +66,25 @@ waitfor() {
     t0 && index($0, pat) { printf "+%.1fms after prompt", ($1 - t0) * 1000; exit }')
   printf '%-34s | %s\n' "$3: ${when:-never}" "$(line)"
 }
+# Toolchains: a fake rustc behaving like a rustup shim (version from the
+# nearest rust-toolchain file, else 1.0.0).
+TC=$LOGD/tc
+mkdir -p "$TC/bin" "$TC/proj/sub" "$TC/py/.venv"
+cat > "$TC/bin/rustc" <<'SH'
+#!/bin/sh
+d=$PWD
+while [ "$d" != / ]; do [ -f "$d/rust-toolchain" ] && { echo "rustc $(cat "$d/rust-toolchain") (x)"; exit; }; d=$(dirname "$d"); done
+echo "rustc 1.0.0 (x)"
+SH
+chmod +x "$TC/bin/rustc"
+touch "$TC/proj/sub/Cargo.toml"
+step "export PATH=$TC/bin:\$PATH" 0.3 "fake rustc on PATH"
+waitfor "cd $TC/proj/sub" 'v1.0.0' "rust project: version"
+waitfor "echo 1.2.3 > ../rust-toolchain" 'v1.2.3' "rust-toolchain pin in parent"
+waitfor "rm ../rust-toolchain" 'v1.0.0' "pin removed"
+waitfor "export VIRTUAL_ENV=$TC/py/.venv; cd $TC/py" '(py)' "python venv"
+step "unset VIRTUAL_ENV; cd $WORK" 0.3 "back"
+
 if [ -n "$BIG" ]; then
   waitpatch "cd $BIG" "big repo cold"
   waitpatch "cd - >/dev/null; cd $BIG" "big repo revisit"

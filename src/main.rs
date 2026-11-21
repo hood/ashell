@@ -5,6 +5,7 @@ mod git;
 mod gitnative;
 mod protocol;
 mod render;
+mod toolchain;
 mod untracked;
 
 use std::path::PathBuf;
@@ -163,8 +164,24 @@ fn explain(req: Request) {
     let p99 = samples[samples.len() * 99 / 100].0;
     let (warm_t, warm) = samples.swap_remove(samples.len() / 2);
 
+    // Like the daemon: every prompt is new, so async state revalidates
+    // (git freshness, toolchain keys) within the 3ms deadline.
+    let mut fresh: Vec<(Duration, bool)> = (0..200)
+        .map(|_| {
+            let t = Instant::now();
+            let r = engine.render(&req, daemon::DEADLINE, Instant::now(), Shell::Plain);
+            (t.elapsed(), r.pending)
+        })
+        .collect();
+    fresh.sort_by_key(|s| s.0);
+    let late = fresh.iter().filter(|s| s.1).count();
+
     println!("frame 1, cold : {:>9.1?}  pending={}", cold_t, cold.pending);
     println!("frame 1, warm : {:>9.1?}  p50 of 500, p99 {:.1?}, pending={}", warm_t, p99, warm.pending);
+    println!(
+        "frame 1, new prompt: {:>9.1?}  p50 of 200, p99 {:.1?}, pending {late}/200",
+        fresh[100].0, fresh[198].0
+    );
     for (name, d) in &warm.timings {
         println!("  {name:<10}: {d:>9.1?}");
     }
