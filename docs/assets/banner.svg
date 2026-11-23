@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="1200" height="420" font-family="'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <style>
+    .t{fill:#ecebe4}.m{fill:#9a9fa8}.f{fill:#80868f}.l{fill:#c8ff3c}.c{fill:#ff5d3a}
+    .serif{font-family:'Instrument Serif',Georgia,'Times New Roman',serif}
+    .slow{transform-box:fill-box;transform-origin:left center;animation:slow 4.5s cubic-bezier(.4,0,.6,1) infinite}
+    .fast{animation:fast 4.5s steps(1) infinite}
+    .cur{animation:blink 1s steps(1) infinite}
+    .wait{animation:wait 4.5s steps(1) infinite}
+    .done{animation:done 4.5s steps(1) infinite}
+    @keyframes slow{0%{transform:scaleX(0)}10%{transform:scaleX(0)}40%{transform:scaleX(.86)}100%{transform:scaleX(.86)}}
+    @keyframes fast{0%{opacity:0}10%{opacity:1}100%{opacity:1}}
+    @keyframes blink{50%{opacity:0}}
+    @keyframes wait{0%{opacity:0}10%{opacity:1}40%{opacity:0}100%{opacity:0}}
+    @keyframes done{0%{opacity:0}40%{opacity:1}100%{opacity:1}}
+    @keyframes fdone{0%{opacity:0}10%{opacity:1}100%{opacity:1}}
+    .fdone{animation:fdone 4.5s steps(1) infinite}
+  </style>
+  <defs>
+    <pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0v40" fill="none" stroke="#23272f" stroke-width="1"/></pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a0b0d" stop-opacity="0"/><stop offset="1" stop-color="#0a0b0d"/></linearGradient>
+    <linearGradient id="lg" x1="0" x2="1"><stop offset="0" stop-color="#8fbf1f"/><stop offset="1" stop-color="#c8ff3c"/></linearGradient>
+    <linearGradient id="cg" x1="0" x2="1"><stop offset="0" stop-color="#b8371c"/><stop offset="1" stop-color="#ff5d3a"/></linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="18" fill="#0a0b0d"/>
+  <rect width="1200" height="420" rx="18" fill="url(#g)" opacity=".5"/>
+  <rect width="1200" height="420" rx="18" fill="url(#fade)"/>
+
+  <text x="60" y="92" class="l" font-size="44" font-weight="800">❯</text>
+  <text x="100" y="92" class="t" font-size="44" font-weight="800" letter-spacing="-1.5">ashell</text>
+  <text x="62" y="140" class="t" font-size="32" font-weight="800" letter-spacing="-1.5">Your prompt in <tspan class="l">115 µs</tspan>. <tspan class="f">Never blocks.</tspan></text>
+  <text x="62" y="172" class="m" font-size="15">daemon-backed zsh prompt · zero forks per prompt · incremental git status</text>
+
+  <!-- race -->
+  <text x="62" y="232" class="f" font-size="13" letter-spacing="2">FULL PROMPT, AS ZSH SEES IT · 23K-FILE REPO · MACOS ARM64</text>
+
+  <text x="62" y="281" class="t" font-size="16">fork+exec true</text>
+  <rect x="230" y="262" width="730" height="28" rx="6" fill="#111317"/>
+  <rect x="230" y="262" width="730" height="28" rx="6" fill="url(#cg)" class="slow"/>
+  <text x="980" y="282" class="c" font-size="17" font-weight="700">3.9 ms</text>
+  <rect x="1060" y="266" width="10" height="20" fill="#ff5d3a" class="wait"/>
+  <text x="1060" y="282" class="c done" font-size="17">❯</text>
+
+  <text x="62" y="337" class="l" font-size="16" font-weight="700">ashell</text>
+  <rect x="230" y="318" width="730" height="28" rx="6" fill="#111317"/>
+  <rect x="230" y="318" width="21" height="28" rx="3" fill="url(#lg)" class="fast"/>
+  <text x="980" y="338" class="l" font-size="17" font-weight="700">0.115 ms</text>
+  <text x="1080" y="338" class="l fdone" font-size="17">❯</text>
+  <rect x="1098" y="322" width="10" height="20" fill="#ecebe4" class="cur"/>
+
+  <text x="62" y="392" class="f" font-size="13">34× cheaper than spawning nothing · 513/513 repos match git status · no fork, no subprocess on the render path</text>
+</svg>

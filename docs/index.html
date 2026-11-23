@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ashell: the 115 µs shell prompt</title>
+<meta name="description" content="A daemon-backed zsh prompt. Frame 1 in 115 µs, zero forks per prompt, git status that never blocks.">
+<meta property="og:title" content="ashell: the 115 µs shell prompt">
+<meta property="og:description" content="Daemon-backed zsh prompt. Zero forks, incremental git status, frame 1 in 115 µs even in a 23k-file repo.">
+<meta property="og:image" content="assets/banner.svg">
+<meta name="theme-color" content="#0a0b0d">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230a0b0d'/><path d='M10 8l9 8-9 8' stroke='%23c8ff3c' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0a0b0d; --ink-2:#111317; --ink-3:#181b21; --line:#23272f; --line-2:#2e333d;
+  --paper:#ecebe4; --muted:#9a9fa8; --faint:#80868f;
+  --lime:#c8ff3c; --lime-dim:#c8ff3c22; --coral:#ff5d3a; --coral-dim:#ff5d3a22;
+  --cyan:#5fd7ff; --purple:#c792ea; --yellow:#ffcb6b; --green:#a5e075; --blue:#82aaff; --red:#ff5370;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --display:"JetBrains Mono",ui-monospace,monospace;
+  --sans:"IBM Plex Sans",system-ui,sans-serif;
+  --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;background:var(--ink)}
+body{background:var(--ink);color:var(--paper);font-family:var(--sans);font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit}
+::selection{background:var(--lime);color:var(--ink)}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+code,pre,.mono{font-family:var(--mono)}
+
+main,nav,footer{position:relative;z-index:1}
+
+/* nav */
+nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:#0a0b0dcc;border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:28px;height:60px}
+.logo{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:800;font-size:18px;text-decoration:none;letter-spacing:-.02em}
+.logo b{color:var(--lime)}
+nav ul{display:flex;gap:22px;list-style:none;margin-left:auto;font-size:14px;color:var(--muted)}
+nav ul a{text-decoration:none;transition:color .15s}
+nav ul a:hover{color:var(--paper)}
+.gh{display:inline-flex;align-items:center;gap:8px;font-size:14px;padding:7px 14px;border:1px solid var(--line-2);border-radius:999px;text-decoration:none;transition:border-color .15s,background .15s}
+.gh:hover{border-color:var(--lime);background:var(--lime-dim)}
+@media (max-width:860px){nav ul{display:none}.gh{margin-left:auto}}
+
+/* hero */
+.hero{padding-top:88px;padding-bottom:40px}
+.eyebrow{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:13px;color:var(--lime);border:1px solid #c8ff3c44;background:var(--lime-dim);padding:6px 12px;border-radius:999px}
+.eyebrow i{width:7px;height:7px;border-radius:50%;background:var(--lime)}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(40px,7.4vw,96px);line-height:.98;letter-spacing:-.065em;margin:26px 0 26px}
+h1 em{font-style:normal;color:var(--lime)}
+h1 .num{color:var(--lime)}
+h1 .quiet{color:var(--faint)}
+.lede{font-size:clamp(18px,2.1vw,21px);color:#c4c3bb;max-width:690px}
+.lede strong{color:var(--paper);font-weight:600}
+.cta{display:flex;flex-wrap:wrap;gap:14px;margin-top:34px;align-items:center}
+.install{min-width:0;display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:14.5px;background:var(--ink-2);border:1px solid var(--line-2);border-radius:12px;padding:12px 12px 12px 18px;max-width:100%}
+.install span{color:var(--lime)}
+.install code{min-width:0;white-space:nowrap;overflow-x:auto;scrollbar-width:none}
+.copy{flex:none;font:500 12px var(--mono);color:var(--ink);background:var(--lime);border:0;border-radius:8px;padding:7px 11px;cursor:pointer;transition:transform .1s}
+.copy:active{transform:scale(.95)}
+.btn{font-size:15px;font-weight:500;text-decoration:none;padding:12px 20px;border-radius:12px;border:1px solid var(--line-2);transition:border-color .15s}
+.btn:hover{border-color:var(--paper)}
+
+/* race */
+.race{margin-top:48px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:860px){.race{grid-template-columns:1fr}}
+@media (max-width:520px){.bar .hide{display:none}.screen{font-size:12px}.preview .screen{font-size:12px;overflow-x:auto}}
+.term{background:#0d0f12;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;box-shadow:0 30px 80px -30px #000,0 0 0 1px #ffffff05 inset}
+.term.fast{border-color:#c8ff3c66}
+.bar{display:flex;align-items:center;gap:8px;white-space:nowrap;padding:11px 14px;border-bottom:1px solid var(--line);font:12.5px var(--mono);color:var(--muted)}
+.bar i{width:11px;height:11px;border-radius:50%;background:#2a2e36}
+.bar .tag{white-space:nowrap;flex:none;margin-left:auto;padding:2px 9px;border-radius:6px;font-weight:700}
+.slow .tag{background:var(--coral-dim);color:var(--coral)}
+.fast .tag{background:var(--lime-dim);color:var(--lime)}
+.screen{font:13.5px/1.65 var(--mono);padding:14px 16px;height:262px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}
+.screen>div{white-space:pre;overflow:hidden}
+.screen .out{color:var(--muted)}
+.cur{display:inline-block;width:.6em;height:1.15em;background:var(--paper);vertical-align:-.2em;animation:blink 1s steps(1) infinite}
+.wait .cur{background:var(--coral)}
+@keyframes blink{50%{opacity:0}}
+.stats{display:flex;gap:24px;padding:12px 16px;border-top:1px solid var(--line);font:12.5px var(--mono);color:var(--muted)}
+.stats b{color:var(--paper);font-weight:700}
+.slow .stats .w b{color:var(--coral)}
+.fast .stats .w b{color:var(--lime)}
+.race-note{grid-column:1/-1;font:13px var(--mono);color:var(--faint);text-align:center}
+
+/* prompt colors */
+.c-dir{color:var(--cyan);font-weight:700}.c-br{color:var(--purple)}.c-mod{color:var(--yellow)}.c-un{color:var(--blue)}.c-st{color:var(--green)}
+.c-ok{color:var(--green);font-weight:700}.c-err{color:var(--red);font-weight:700}.c-rs{color:var(--red);font-weight:700}.c-dur{color:var(--yellow)}.dim{opacity:.72}
+
+/* sections */
+section.wrap{padding-top:120px}
+.kicker{font:600 12.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--lime);margin-bottom:16px}
+h2{font-family:var(--display);font-weight:800;font-size:clamp(30px,4.4vw,56px);line-height:1.04;letter-spacing:-.055em;max-width:900px}
+h2 em{font-style:normal;color:var(--lime)}
+.sub{color:#b9b8b0;max-width:680px;margin-top:20px;font-size:18px}
+.sub code,.card code,td code,li code{font-size:.86em;background:var(--ink-3);border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--paper)}
+
+/* numbers */
+.nums{display:grid;grid-template-columns:repeat(4,1fr);margin-top:72px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.nums div{padding:30px 22px;border-left:1px solid var(--line)}
+.nums div:first-child{border-left:0}
+.nums b{display:block;font:800 clamp(34px,4.4vw,54px)/1 var(--mono);letter-spacing:-.05em;color:var(--paper)}
+.nums b small{font-size:18px;color:var(--lime);margin-left:4px;letter-spacing:0}
+.nums span{display:block;margin-top:12px;font-size:14.5px;color:var(--muted)}
+@media (max-width:860px){.nums{grid-template-columns:1fr 1fr}.nums div:nth-child(3){border-left:0}.nums div:nth-child(n+3){border-top:1px solid var(--line)}}
+
+/* chart */
+.chart{margin-top:48px;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r);padding:28px}
+.chart-head{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;margin-bottom:26px}
+.chart-head p{font:13px var(--mono);color:var(--muted)}
+.seg{display:inline-flex;background:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:3px}
+.seg button{font:500 12.5px var(--mono);color:var(--muted);background:none;border:0;padding:7px 13px;border-radius:7px;cursor:pointer}
+.seg button.on{background:var(--paper);color:var(--ink)}
+.row{display:grid;grid-template-columns:250px 1fr 92px;gap:18px;align-items:center;padding:9px 0}
+.row .lbl{font:14px var(--mono)}
+.row .lbl small{display:block;color:var(--faint);font-size:11.5px}
+.track{height:30px;background:var(--ink);border-radius:7px;overflow:hidden;position:relative}
+.fill{height:100%;width:0;border-radius:7px;background:var(--line-2);transition:width 1.1s cubic-bezier(.2,.8,.2,1)}
+.row.me .fill{background:linear-gradient(90deg,#8fbf1f,var(--lime))}
+.row.them .fill{background:linear-gradient(90deg,#b8371c,var(--coral))}
+.row .v{font:700 14px var(--mono);text-align:right}
+.row.me .v{color:var(--lime)}.row.them .v{color:var(--coral)}
+.axis{display:grid;grid-template-columns:250px 1fr 92px;gap:18px;margin-top:8px}
+.axis div{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--faint)}
+.lin-note{font:13px var(--mono);color:var(--lime);margin-top:14px;min-height:20px}
+@media (max-width:760px){.row,.axis{grid-template-columns:1fr 70px}.row .lbl{grid-column:1/-1}.axis>div:first-child{display:none}.axis>div:last-child{display:none}}
+
+/* how */
+.how{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:48px}
+@media (max-width:860px){.how{grid-template-columns:1fr}}
+.card{background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r);padding:28px;position:relative;overflow:hidden}
+.card h3{font:700 18px var(--mono);letter-spacing:-.02em;margin-bottom:10px}
+.card p{color:#b4b3ab;font-size:15.5px}
+.card.wide{grid-column:1/-1}
+.timeline{margin-top:26px}
+.tl-row{display:grid;grid-template-columns:110px 1fr;gap:14px;align-items:center;margin:10px 0;font:13px var(--mono)}
+.tl-row .who{color:var(--muted)}
+.tl{position:relative;height:50px;background:var(--ink);border:1px solid var(--line);border-radius:8px}
+.tl .blk{position:absolute;top:10px;bottom:10px;border-radius:5px;display:flex;align-items:center;padding:0 10px;font-size:12px;white-space:nowrap;overflow:hidden}
+.tl .f1{left:1%;width:3px;background:var(--lime);padding:0}
+.tl .f1lbl{position:absolute;left:calc(1% + 10px);top:50%;transform:translateY(-50%);font-size:12px;color:var(--lime)}
+.tl .work{left:24%;width:50%;border:1px dashed var(--line-2);color:var(--faint)}
+.tl .patch{left:75%;width:3px;background:var(--purple);padding:0}
+.tl .patchlbl{position:absolute;left:calc(75% + 10px);top:50%;transform:translateY(-50%);font-size:12px;color:var(--purple)}
+.tl .block{left:1%;width:94%;background:var(--coral-dim);border:1px solid #ff5d3a55;color:var(--coral)}
+.tl .end{left:95.5%;width:3px;background:var(--coral);padding:0}
+.frames{display:flex;flex-direction:column;gap:8px;margin-top:22px;font:14px var(--mono)}
+.frames div{background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 14px;display:flex;gap:14px;align-items:center}
+.frames small{color:var(--faint);min-width:96px;font-size:12px}
+
+.arch{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:14px;align-items:stretch;margin-top:24px}
+.arch .node{background:var(--ink);border:1px solid var(--line-2);border-radius:12px;padding:16px;font:13px/1.6 var(--mono);color:var(--muted)}
+.arch .node b{display:block;color:var(--paper);font-size:14px;margin-bottom:6px}
+.arch .node.hl{border-color:#c8ff3c66}
+.arch .node.hl b{color:var(--lime)}
+.arch .arrow{display:flex;align-items:center;color:var(--faint);font:18px var(--mono)}
+@media (max-width:860px){.arch{grid-template-columns:1fr}.arch .arrow{justify-content:center;transform:rotate(90deg)}}
+
+/* git */
+.gitgrid{display:grid;grid-template-columns:1.3fr 1fr;gap:18px;margin-top:48px}
+@media (max-width:960px){.gitgrid{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font:14px var(--mono)}
+th{font-weight:500;color:var(--faint);text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;padding:0 0 12px}
+td{padding:11px 0;border-top:1px solid var(--line);vertical-align:middle}
+td.n{text-align:right;white-space:nowrap}
+td .old{color:var(--faint);text-decoration:line-through}
+td .new{color:var(--lime);font-weight:700}
+.x{display:inline-block;margin-left:8px;font-size:11.5px;color:var(--ink);background:var(--lime);border-radius:5px;padding:1px 6px;font-weight:800}
+.big{font:800 clamp(56px,8vw,96px)/.9 var(--mono);letter-spacing:-.06em;color:var(--lime)}
+.big small{display:block;font:500 15px var(--mono);color:var(--muted);letter-spacing:0;margin-top:10px}
+.vs{display:flex;flex-direction:column;gap:12px;margin-top:22px}
+.vs .r{display:grid;grid-template-columns:70px 1fr 64px;gap:10px;align-items:center;font:13px var(--mono)}
+.vs .t{height:14px;border-radius:4px;background:var(--ink);overflow:hidden}
+.vs .t i{display:block;height:100%;border-radius:4px;width:0;transition:width 1.2s cubic-bezier(.2,.8,.2,1)}
+
+/* toolchains */
+.chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+.chip{font:14px var(--mono);padding:9px 14px;border:1px solid var(--line-2);border-radius:999px;background:var(--ink);transition:border-color .2s,transform .2s}
+.chip:hover{border-color:var(--lime);transform:translateY(-2px)}
+.feat{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:48px}
+@media (max-width:960px){.feat{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){.feat{grid-template-columns:1fr}}
+.feat .card h3{font-size:16px}
+.feat h3{display:flex;align-items:baseline;gap:10px}
+.feat .ico{color:var(--lime);font:800 16px var(--mono)}
+
+/* config */
+.cfg{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:48px}
+@media (max-width:960px){.cfg{grid-template-columns:1fr}}
+pre.code{background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r);padding:22px;font:13.5px/1.7 var(--mono);overflow-x:auto;color:#cfcec6}
+.k{color:var(--cyan)}.s{color:var(--green)}.cm{color:var(--faint);font-style:italic}.h{color:var(--purple)}.nu{color:var(--yellow)}
+.preview{background:#0d0f12;border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column}
+.preview .screen{height:auto;flex:1;justify-content:center;font-size:15.5px;padding:30px 22px;min-height:240px}
+.ln{display:flex;justify-content:space-between;gap:16px;white-space:pre;min-height:1.65em}
+.pl{display:inline-flex;align-items:stretch;height:1.65em;vertical-align:middle}
+.pl span{display:inline-flex;align-items:center;padding:0 .6em}
+.pl svg{height:100%;width:.62em;display:block}
+
+/* install */
+.steps{counter-reset:s;display:grid;gap:14px;margin-top:44px}
+.step{display:grid;grid-template-columns:56px 1fr;gap:18px;align-items:start;background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r);padding:22px}
+.step::before{counter-increment:s;content:counter(s,decimal-leading-zero);font:800 22px var(--mono);color:var(--lime)}
+.step h3{font:700 16px var(--mono);margin-bottom:8px}
+.step pre{font:13.5px/1.7 var(--mono);background:var(--ink);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;margin-top:8px;color:#d7d6ce}
+.step p{color:#b4b3ab;font-size:15px}
+
+/* roadmap */
+.road{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:48px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+@media (max-width:860px){.road{grid-template-columns:1fr 1fr}}
+.ms{padding:24px;border-left:1px solid var(--line);background:var(--ink-2)}
+.ms:first-child{border-left:0}
+@media (max-width:860px){.ms:nth-child(3){border-left:0}.ms:nth-child(n+3){border-top:1px solid var(--line)}}
+.ms h3{font:800 28px var(--mono);letter-spacing:-.04em}
+.ms .st{display:inline-block;font:700 11px var(--mono);padding:3px 8px;border-radius:5px;margin:10px 0 14px;letter-spacing:.06em;text-transform:uppercase}
+.st.done{background:var(--lime);color:var(--ink)}.st.wip{background:var(--coral-dim);color:var(--coral)}.st.next{background:var(--ink-3);color:var(--muted)}
+.ms ul{list-style:none;font-size:14.5px;color:#b4b3ab;display:grid;gap:6px}
+.ms li::before{content:"› ";color:var(--faint)}
+.ms li.ok::before{content:"✓ ";color:var(--lime)}
+
+/* footer */
+section.outro{padding-top:140px;padding-bottom:80px;text-align:center}
+.outro h2{margin:0 auto}
+.outro .cta{justify-content:center}
+footer{border-top:1px solid var(--line);padding:28px 0;font:13px var(--mono);color:var(--faint)}
+footer .wrap{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between}
+
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .7s,transform .7s}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="logo" href="#"><b>❯</b>ashell</a>
+    <ul>
+      <li><a href="#speed">Speed</a></li>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#git">Git</a></li>
+      <li><a href="#config">Config</a></li>
+      <li><a href="#install">Install</a></li>
+    </ul>
+    <a class="gh" href="https://github.com/hood/ashell">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<main>
+<header class="hero wrap">
+  <span class="eyebrow"><i></i>zsh · Rust · zero forks per prompt</span>
+  <h1>Your prompt<br>in <span class="num">115µs</span>.<br><span class="quiet">Never blocks.</span></h1>
+  <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. It draws <strong>frame&nbsp;1 instantly</strong> from cache, then patches in slow stuff like git status as it lands. Nothing on the critical path spawns a process, so even in a 23k-file repo the whole round trip takes <strong>0.115&nbsp;ms</strong>.</p>
+  <div class="cta">
+    <div class="install"><code><span>$</span> cargo install --git https://github.com/hood/ashell</code><button class="copy" data-copy="cargo install --git https://github.com/hood/ashell">copy</button></div>
+    <a class="btn" href="#how">How it works →</a>
+  </div>
+
+  <div class="nums reveal">
+    <div><b data-count="115">0<small>µs</small></b><span>full prompt as zsh sees it, git repo, warm</span></div>
+    <div><b data-count="34">0<small>×</small></b><span>cheaper than forking <code>/usr/bin/true</code></span></div>
+    <div><b data-count="0">0<small>forks</small></b><span>per prompt: pure zsh builtins over a unix socket</span></div>
+    <div><b data-count="513">0<small>/513</small></b><span>local repos where git status matches <code>git</code> exactly</span></div>
+  </div>
+</header>
+
+<section id="speed" class="wrap">
+  <div class="reveal">
+    <p class="kicker">// benchmarks</p>
+    <h2>Faster than <em>forking</em> /usr/bin/true.</h2>
+    <p class="sub">On macOS, a bare <code>fork+exec</code> costs ~4&nbsp;ms before any work happens. Every prompt that shells out pays that. ashell's zsh side never forks: it talks to the daemon with <code>zsh/net/socket</code> and <code>sysread</code>, so the whole round trip is cheaper than spawning nothing.</p>
+  </div>
+  <div class="race reveal" id="race">
+    <div class="term slow">
+      <div class="bar"><i></i><i></i><i></i>&nbsp; starship<span class="hide"> · aports (23k files)</span><span class="tag">544 ms / prompt</span></div>
+      <div class="screen" data-delay="544"></div>
+      <div class="stats"><span>prompts <b class="cnt">0</b></span><span class="w">waited <b class="wt">0 ms</b></span></div>
+    </div>
+    <div class="term fast">
+      <div class="bar"><i></i><i></i><i></i>&nbsp; ashell<span class="hide"> · aports (23k files)</span><span class="tag">0.115 ms / prompt</span></div>
+      <div class="screen" data-delay="0.115"></div>
+      <div class="stats"><span>prompts <b class="cnt">0</b></span><span class="w">waited <b class="wt">0 ms</b></span></div>
+    </div>
+    <p class="race-note">same typing speed, same commands, real measured latencies (macOS arm64, alpine/aports). Hit enter, wait for the prompt.</p>
+  </div>
+
+  <div class="chart reveal">
+    <div class="chart-head">
+      <p>time per prompt · aports (23k files) · lower is better</p>
+      <div class="seg" id="scale"><button class="on" data-s="log">log scale</button><button data-s="lin">linear (brutal)</button></div>
+    </div>
+    <div id="bars"></div>
+    <div class="axis" id="axis"><div></div><div></div><div></div></div>
+    <p class="lin-note" id="linnote"></p>
+  </div>
+</section>
+
+<section id="how" class="wrap">
+  <div class="reveal">
+    <p class="kicker">// how it works</p>
+    <h2>Draw now. <em>Patch</em> later.</h2>
+    <p class="sub">Most prompts block on their slowest module. ashell splits rendering in two: an instant frame from whatever is cached, then patch frames pushed over the socket as slow segments finish. zsh repaints via <code>zle -F</code> + <code>reset-prompt</code>, so you can start typing right away.</p>
+  </div>
+
+  <div class="how">
+    <div class="card wide reveal">
+      <h3>Two-phase render</h3>
+      <p>One prompt, from <code>precmd</code> to fully correct.</p>
+      <div class="timeline">
+        <div class="tl-row"><span class="who">starship</span><div class="tl"><div class="blk block">blocked: git_status 514ms, directory 16ms…</div><div class="blk end"></div></div></div>
+        <div class="tl-row"><span class="who" style="color:var(--lime)">ashell</span><div class="tl"><div class="blk f1"></div><span class="f1lbl">frame 1 · 0.1ms</span><div class="blk work">git status off the critical path</div><div class="blk patch"></div><span class="patchlbl">patch frame</span></div></div>
+      </div>
+      <div class="frames">
+        <div><small>t = 0.1 ms</small><span><span class="c-dir">aports</span> <span class="c-br dim">⎇ master !3</span> <span class="c-ok">❯</span> <span class="out" style="color:var(--faint)">← stale count, dimmed</span></span></div>
+        <div><small>t ≈ 1 ms</small><span><span class="c-dir">aports</span> <span class="c-br">⎇ master</span> <span class="c-mod">!4</span> <span class="c-un">?1</span> <span class="c-ok">❯</span> <span class="out" style="color:var(--faint)">← patch frame, you're already typing</span></span></div>
+      </div>
+    </div>
+
+    <div class="card reveal">
+      <h3>A daemon that remembers</h3>
+      <p>One per user. Keeps parsed config, directory listings, git state and toolchain versions in memory across prompts and shells. A filesystem watcher (FSEvents / inotify) marks exactly what changed, so the next status only looks at that.</p>
+    </div>
+    <div class="card reveal">
+      <h3>Zero-fork shell side</h3>
+      <p>Pure zsh: <code>zsocket</code>, <code>sysread</code>, <code>syswrite</code>, <code>zle -Fw</code>. Frames are <code>0x1F</code>/<code>0x1E</code>-delimited, one syscall each way, no JSON. Prompt text goes through a variable with <code>prompt_subst</code>, so a branch named <code>$(rm -rf ~)</code> is just text.</p>
+    </div>
+
+    <div class="card wide reveal">
+      <h3>Architecture</h3>
+      <div class="arch">
+        <div class="node"><b>zsh</b>precmd → request<br>zle -F → patch<br>~110 µs total</div>
+        <div class="arrow">⇄</div>
+        <div class="node hl"><b>ashell daemon</b>sessions · scheduler<br>cache · compiled config<br>3 ms deadline per frame</div>
+        <div class="arrow">⇄</div>
+        <div class="node"><b>workers</b>gix status · FS watcher<br>toolchain probes<br>(off the render path)</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="git" class="wrap">
+  <div class="reveal">
+    <p class="kicker">// git status</p>
+    <h2>Git status in <em>O(what changed)</em>.</h2>
+    <p class="sub">Native status on top of gitoxide plus an in-memory untracked cache. The watcher's dirty set means an edit re-checks one file, not 23k. Staged changes walk git's own cache-tree, which is valid right after a commit. When cold, <code>git</code> answers while the native cache warms in the background.</p>
+  </div>
+  <div class="gitgrid">
+    <div class="card reveal">
+      <table>
+        <thead><tr><th>after you…</th><th style="text-align:right">full recompute → incremental</th></tr></thead>
+        <tbody>
+          <tr><td>do nothing</td><td class="n"><span class="old">70 ms</span> <span class="new">0.04 ms</span><span class="x">1750×</span></td></tr>
+          <tr><td>add/remove a file</td><td class="n"><span class="old">70 ms</span> <span class="new">0.2–1.4 ms</span><span class="x">50×+</span></td></tr>
+          <tr><td>edit a tracked file</td><td class="n"><span class="old">70 ms</span> <span class="new">0.6–0.8 ms</span><span class="x">90×</span></td></tr>
+          <tr><td><code>git reset --hard</code></td><td class="n"><span class="old">80 ms</span> <span class="new">1.6–13 ms</span><span class="x">6×+</span></td></tr>
+          <tr><td><code>git commit</code></td><td class="n"><span class="old">80 ms</span> <span class="new">15 ms</span><span class="x">5×</span></td></tr>
+          <tr><td><code>git add</code></td><td class="n"><span class="old">80 ms</span> <span class="new">16–18 ms</span><span class="x">4.5×</span></td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:16px;font:12.5px var(--mono);color:var(--faint)">aports clone, 23k files, warm daemon. Prompt shows the right status ~13–18 ms after the command, ~10 ms of which is FSEvents delivery.</p>
+    </div>
+    <div class="card reveal">
+      <h3>Every local repo, summed</h3>
+      <p>Full status passes across 513 real repos, no watcher help.</p>
+      <div class="big" style="margin-top:22px">8.8×<small> faster than git</small></div>
+      <div class="vs" id="vs">
+        <div class="r"><span style="color:var(--lime)">ashell</span><div class="t"><i data-w="11.3" style="background:var(--lime)"></i></div><span>3.0 s</span></div>
+        <div class="r"><span style="color:var(--coral)">git</span><div class="t"><i data-w="100" style="background:var(--coral)"></i></div><span>26.5 s</span></div>
+      </div>
+      <p style="margin-top:22px;font-size:14.5px">Correctness checked against <code>git status --porcelain=v2</code>: <b style="color:var(--lime)">513/513</b> repos, cold and warm, plus a 42-step mutation suite (submodules, renames, conflicts, case-only renames, ignore rules) driven through the real watcher.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="reveal">
+    <p class="kicker">// toolchains</p>
+    <h2>Versions <em>without</em> the spawn tax.</h2>
+    <p class="sub">Detected like starship (marker files, extensions). The version is keyed on the resolved binary's <code>stat</code>, pin files up the tree, global defaults and env. The tool only runs again when that key changes, on a 4-thread pool, never on the render path.</p>
+  </div>
+  <div class="chips reveal">
+    <span class="chip">🦀 rust</span><span class="chip"><span style="color:var(--green)">⬢</span> node</span><span class="chip">🐍 python + venv</span><span class="chip">🐹 go</span><span class="chip">💎 ruby</span><span class="chip">☕ java</span><span class="chip">🥟 bun</span><span class="chip">🦕 deno</span>
+  </div>
+
+  <div class="feat">
+    <div class="card reveal"><h3><span class="ico">⚡</span>One-shot fallback</h3><p>No daemon? The same core renders in-process and spawns the daemon detached. Next prompt is back to microseconds.</p></div>
+    <div class="card reveal"><h3><span class="ico">↻</span>Self-upgrading</h3><p>The daemon exits when its binary changes. Rebuild, hit enter, you're on the new version.</p></div>
+    <div class="card reveal"><h3><span class="ico">◐</span>Stale, not wrong</h3><p>Cached values render dimmed while they revalidate. You always know what's fresh.</p></div>
+    <div class="card reveal"><h3><span class="ico">?</span><code style="background:none;border:0;padding:0">ashell explain</code></h3><p>Per-segment timings, cold vs warm, p50/p99, and how long the async git status took.</p></div>
+    <div class="card reveal"><h3><span class="ico">🔒</span>Locked down</h3><p>Socket in a 0700 dir, peer uid checked. The daemon never trusts its own env: the shell sends the vars segments depend on.</p></div>
+    <div class="card reveal"><h3><span class="ico">≋</span>Survives everything</h3><p>Daemon killed mid-session, SIGPIPE, dropped watcher events: falls back cleanly, reconnects on the next prompt.</p></div>
+  </div>
+</section>
+
+<section id="config" class="wrap">
+  <div class="reveal">
+    <p class="kicker">// config</p>
+    <h2>Powerline in <em>twenty lines</em>.</h2>
+    <p class="sub">One TOML file at <code>~/.config/ashell/config.toml</code>. Every key optional, Starship-like styles (<code>bold cyan</code>, <code>bg:#1e1e2e</code>, <code>fg:208</code>). Typos are errors with line numbers, and a broken file falls back to defaults with a <code>⚠ config</code> marker instead of a dead prompt.</p>
+  </div>
+  <div class="cfg">
+    <pre class="code reveal" id="cfgcode"></pre>
+    <div class="preview reveal">
+      <div class="bar"><i></i><i></i><i></i>&nbsp; preview<div class="seg" id="cfgsel" style="margin-left:auto"><button class="on" data-c="default">default</button><button data-c="powerline">powerline</button></div></div>
+      <div class="screen" id="cfgprev"></div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="wrap">
+  <div class="reveal">
+    <p class="kicker">// install</p>
+    <h2>Two lines. <em>Done.</em></h2>
+  </div>
+  <div class="steps">
+    <div class="step reveal"><div><h3>Build it</h3><p>Rust 2024 edition. Release profile is fat LTO, single codegen unit, <code>panic = "abort"</code>.</p><pre>cargo install --git https://github.com/hood/ashell</pre></div></div>
+    <div class="step reveal"><div><h3>Hook it into zsh</h3><p>Add to <code>~/.zshrc</code>. The daemon starts itself on the first prompt.</p><pre>eval "$(ashell init zsh)"</pre></div></div>
+    <div class="step reveal"><div><h3>Make it yours (optional)</h3><p>Dump the documented defaults, edit, then <code>ashell stop</code> to reload.</p><pre>ashell config default &gt; ~/.config/ashell/config.toml
+ashell config check
+ashell stop</pre></div></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="reveal">
+    <p class="kicker">// roadmap</p>
+    <h2>Where it's <em>going</em>.</h2>
+  </div>
+  <div class="road reveal">
+    <div class="ms"><h3>M1</h3><span class="st done">done</span><ul><li class="ok">daemon + zsh, zero fork</li><li class="ok">dir / git / status / duration</li><li class="ok">one-shot fallback</li><li class="ok">native incremental git</li></ul></div>
+    <div class="ms"><h3>M2</h3><span class="st wip">in progress</span><ul><li class="ok">toolchain segments</li><li class="ok">config file, powerline</li><li class="ok"><code>explain</code></li><li><code>bench</code>, bash, fish</li></ul></div>
+    <div class="ms"><h3>M3</h3><span class="st next">next</span><ul><li>custom segments</li><li>starship config import</li><li>hot reload</li></ul></div>
+    <div class="ms"><h3>M4</h3><span class="st next">later</span><ul><li>nushell</li><li>PowerShell</li><li>WASM plugins</li></ul></div>
+  </div>
+</section>
+
+<section class="outro wrap reveal">
+  <h2>Stop waiting for your <em>prompt</em>.</h2>
+  <div class="cta">
+    <div class="install"><code><span>$</span> eval "$(ashell init zsh)"</code><button class="copy" data-copy='eval "$(ashell init zsh)"'>copy</button></div>
+    <a class="btn" href="https://github.com/hood/ashell">Star on GitHub ★</a>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap"><span>ashell · MIT</span><span>numbers: macOS arm64, measured with hyperfine and zsh <code>$EPOCHREALTIME</code>. see <a href="https://github.com/hood/ashell/blob/main/DESIGN.md">DESIGN.md</a></span></div>
+</footer>
+
+<script>
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+
+// copy buttons
+$$('.copy').forEach(b=>b.onclick=()=>{navigator.clipboard?.writeText(b.dataset.copy);b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)});
+
+// ---------- race ----------
+const PROMPTS=[
+  {dir:'aports',br:'master',st:''},
+  {dir:'aports',br:'master',st:'<span class="c-un">?1</span>'},
+  {dir:'aports',br:'master',st:'<span class="c-st">+1</span>'},
+  {dir:'aports/main',br:'master',st:'<span class="c-st">+1</span>'},
+  {dir:'aports/main',br:'master',st:'<span class="c-st">+1</span> <span class="c-mod">!1</span>'},
+  {dir:'aports',br:'master',st:'<span class="c-st">+1</span> <span class="c-mod">!1</span>'},
+  {dir:'aports',br:'master',st:'<span class="c-mod">!1</span>'},
+  {dir:'aports',br:'master',st:''},
+];
+const CMDS=[
+  ['touch notes.md',[]],
+  ['git add notes.md',[]],
+  ['cd main',[]],
+  ['vim curl/APKBUILD',[]],
+  ['cd ..',[]],
+  ['git commit -qm wip',[]],
+  ['git checkout -q .',[]],
+  ['ls | wc -l',['   23461']],
+];
+function promptHTML(i){const p=PROMPTS[i%PROMPTS.length];return `<span class="c-dir">${p.dir}</span> <span class="c-br">⎇ ${p.br}</span>${p.st?' '+p.st:''} <span class="c-ok">❯</span> `}
+function runTerm(el){
+  const delay=+el.dataset.delay, term=el.closest('.term'), cnt=$('.cnt',term), wt=$('.wt',term);
+  let lines=[], cur='', i=0, n=0, waited=0, waiting=false;
+  const MAX=11;
+  const draw=()=>{const tail=waiting?'<span class="wait"><span class="cur"></span></span>':`${promptHTML(i)}${cur}<span class="cur"></span>`;el.innerHTML='<div>'+[...lines.slice(-MAX+1),tail].join('\n')+'</div>'};
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  (async()=>{
+    draw();await sleep(600);
+    for(;;){
+      const [cmd,out]=CMDS[i%CMDS.length];
+      for(const ch of cmd){cur+=ch;draw();await sleep(38+Math.random()*30)}
+      await sleep(180);
+      lines.push(`${promptHTML(i)}${cur}`);out.forEach(o=>lines.push(`<span class="out">${o}</span>`));
+      cur='';i++;
+      waiting=true;draw();await sleep(delay);waiting=false;
+      n++;waited+=delay;cnt.textContent=n;wt.textContent=waited<1?waited.toFixed(3)+' ms':waited<1000?waited.toFixed(1)+' ms':(waited/1000).toFixed(1)+' s';
+      draw();await sleep(260);
+      if(lines.length>60)lines=lines.slice(-MAX);
+    }
+  })();
+}
+let raceStarted=false;
+new IntersectionObserver((e,o)=>{if(e[0].isIntersecting&&!raceStarted){raceStarted=true;$$('.race .screen').forEach(runTerm);o.disconnect()}},{threshold:.3}).observe($('#race'));
+
+// ---------- bench chart ----------
+const BENCH=[
+  {l:'ashell',s:'zsh → daemon, warm',v:0.115,me:1},
+  {l:'ashell, no repo',s:'',v:0.085,me:1},
+  {l:'fork+exec /usr/bin/true',s:'the floor for anything that spawns',v:3.9},
+  {l:'starship, no repo',s:'',v:17.2,them:1},
+  {l:'git status',s:'the command itself',v:88},
+  {l:'ashell one-shot',s:'no daemon, git inline',v:91},
+  {l:'starship',s:'git_status 514 ms',v:544,them:1},
+];
+const fmt=v=>v<1?(v*1000).toFixed(0)+' µs':v<1000?(v>=10?v.toFixed(0):v.toFixed(1))+' ms':(v/1000).toFixed(1)+' s';
+$('#bars').innerHTML=BENCH.map(b=>`<div class="row ${b.me?'me':''} ${b.them?'them':''}"><div class="lbl">${b.l}${b.s?`<small>${b.s}</small>`:''}</div><div class="track"><div class="fill"></div></div><div class="v">${fmt(b.v)}</div></div>`).join('');
+const LMIN=0.01,LMAX=1000;
+function setScale(s){
+  $$('#scale button').forEach(b=>b.classList.toggle('on',b.dataset.s===s));
+  $$('#bars .fill').forEach((f,k)=>{const v=BENCH[k].v;const w=s==='log'?Math.log10(v/LMIN)/Math.log10(LMAX/LMIN)*100:v/600*100;f.style.width=Math.max(w,s==='lin'?0.15:1)+'%'});
+  const ax=$('#axis').children[1];
+  ax.innerHTML=s==='log'?['10µs','100µs','1ms','10ms','100ms','1s'].map(t=>`<span>${t}</span>`).join(''):['0','150ms','300ms','450ms','600ms'].map(t=>`<span>${t}</span>`).join('');
+  $('#linnote').textContent=s==='lin'?'↑ yes, the ashell bar is there. it is 0.02% of starship. we drew it 1px wide so you can find it.':'';
+}
+$$('#scale button').forEach(b=>b.onclick=()=>setScale(b.dataset.s));
+
+// ---------- config preview ----------
+const CFG={
+default:`<span class="cm"># ~/.config/ashell/config.toml (the defaults)</span>
+<span class="k">left</span>  = [<span class="s">"directory"</span>, <span class="s">"git"</span>, <span class="s">"toolchains"</span>, <span class="s">"character"</span>]
+<span class="k">right</span> = [<span class="s">"duration"</span>, <span class="s">"status"</span>]
+
+<span class="h">[directory]</span>
+<span class="k">truncate</span>      = <span class="nu">4</span>
+<span class="k">repo_relative</span> = <span class="nu">true</span>
+<span class="k">style</span>         = <span class="s">"bold cyan"</span>
+
+<span class="h">[git]</span>
+<span class="k">branch_style</span>  = <span class="s">"purple"</span>
+<span class="k">staged</span>        = <span class="s">"+"</span>   <span class="cm"># green</span>
+<span class="k">modified</span>      = <span class="s">"!"</span>   <span class="cm"># yellow</span>
+<span class="k">untracked</span>     = <span class="s">"?"</span>   <span class="cm"># blue</span>
+<span class="k">stale_style</span>   = <span class="s">"dim"</span> <span class="cm"># while recomputing</span>
+
+<span class="h">[duration]</span>
+<span class="k">min_ms</span> = <span class="nu">2000</span>
+
+<span class="h">[character]</span>
+<span class="k">success_symbol</span> = <span class="s">"❯"</span>
+<span class="k">vicmd_symbol</span>   = <span class="s">"❮"</span>`,
+powerline:`<span class="cm"># examples/powerline.toml</span>
+<span class="k">left</span> = [
+  { <span class="k">text</span> = <span class="s">"cap"</span>, <span class="k">style</span> = <span class="s">"bg:#1B2B34 fg:#C0C5CE"</span> },
+  <span class="s">"directory"</span>, <span class="s">"git"</span>, <span class="s">"newline"</span>,
+]
+<span class="k">right</span>       = []
+<span class="k">add_newline</span> = <span class="nu">true</span>
+<span class="k">separator</span>   = <span class="s">"\\ue0b4"</span>   <span class="cm"># rounded powerline cap</span>
+<span class="k">padding</span>     = <span class="s">" "</span>
+
+<span class="h">[directory]</span>
+<span class="k">truncate</span> = <span class="nu">3</span>
+<span class="k">style</span>    = <span class="s">"bg:#2B4A5E fg:#E0E6EB"</span>
+
+<span class="h">[git]</span>
+<span class="k">branch_style</span>   = <span class="s">"bg:#5FB3B3 fg:#1B2B34"</span>
+<span class="k">modified_style</span> = <span class="s">"fg:#1B2B34"</span>
+<span class="k">stash</span>          = <span class="s">"$"</span>
+<span class="k">hide_counts</span>    = [<span class="s">"stash"</span>]`};
+const cap=(from,to)=>`<svg viewBox="0 0 10 20" preserveAspectRatio="none"><rect width="10" height="20" fill="${to||'transparent'}"/><path d="M0 0h1a9 10 0 010 20H0z" fill="${from}"/></svg>`;
+const PREV={
+default:[
+  [`<span class="c-dir">ashell</span> <span class="c-br">⎇ main</span> <span class="c-rs">🦀 v1.99.1</span> <span class="c-ok">❯</span> cargo build --release`],
+  [`<span class="out">    Finished \`release\` profile [optimized] target(s) in 41.2s</span>`],
+  [`<span class="c-dir">ashell</span> <span class="c-br">⎇ main</span> <span class="c-mod">!2</span> <span class="c-un">?1</span> <span class="c-rs">🦀 v1.99.1</span> <span class="c-ok">❯</span> cd src; false`,`<span class="c-dur">41.2s</span>`],
+  [`<span class="c-dir">ashell/src</span> <span class="c-br">⎇ main</span> <span class="c-mod">!2</span> <span class="c-un">?1</span> <span class="c-rs">🦀 v1.99.1</span> <span class="c-err">❯</span> <span class="cur"></span>`,`<span class="c-err">1</span>`],
+],
+powerline:[
+  [``],
+  [`<span class="pl"><span style="background:#1B2B34;color:#C0C5CE">cap</span>${cap('#1B2B34','#2B4A5E')}<span style="background:#2B4A5E;color:#E0E6EB">ashell/src</span>${cap('#2B4A5E','#5FB3B3')}<span style="background:#5FB3B3;color:#1B2B34">⎇ main !2 ?1 $</span>${cap('#5FB3B3')}</span>`],
+  [`<span class="c-ok">❯</span> <span class="cur"></span>`],
+]};
+function setCfg(c){$$('#cfgsel button').forEach(b=>b.classList.toggle('on',b.dataset.c===c));$('#cfgcode').innerHTML=CFG[c];$('#cfgprev').innerHTML=PREV[c].map(([l,r])=>`<p class="ln"><span>${l||'&nbsp;'}</span>${r?`<span>${r}</span>`:''}</p>`).join('')}
+$$('#cfgsel button').forEach(b=>b.onclick=()=>setCfg(b.dataset.c));
+setCfg('default');
+
+// ---------- reveal + counters + bars ----------
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(!e.isIntersecting)return;const t=e.target;t.classList.add('in');
+  if(t.querySelector('#bars')||t.id==='bars')setScale('log');
+  $$('[data-count]',t).forEach(countUp);
+  $$('#vs i',t).forEach(i=>i.style.width=i.dataset.w+'%');
+  io.unobserve(t)}),{threshold:.2});
+$$('.reveal').forEach(r=>io.observe(r));
+function countUp(b){const to=+b.dataset.count,small=b.querySelector('small').outerHTML,t0=performance.now(),d=1300;
+  const f=now=>{const k=Math.min(1,(now-t0)/d),e=1-Math.pow(1-k,3);b.innerHTML=Math.round(to*e).toLocaleString('en')+small;if(k<1)requestAnimationFrame(f)};requestAnimationFrame(f)}
+</script>
+</body>
+</html>
