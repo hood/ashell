@@ -5,9 +5,10 @@
 //! prompt shows a warning segment.
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
+use std::fmt::{self, Write};
 use std::path::PathBuf;
 
+use serde::de::{self, MapAccess, Visitor};
 use serde::Deserialize;
 
 use crate::toolchain::TOOLS;
@@ -19,9 +20,18 @@ pub const DEFAULT_TOML: &str = r##"# ashell config. Every key is optional: delet
 # strikethrough, colors (black red green yellow blue purple cyan white,
 # bright-<color>, 0-255, #rrggbb), "fg:"/"bg:" prefixes, or "none".
 
-# Segment order. Leave a segment out to disable it.
+# Segment order. Leave a segment out to disable it. Besides the named
+# segments: "newline" (left only) and literal text, e.g.
+# { text = "cap", style = "bg:#1a1a1a" }.
 left = ["directory", "git", "toolchains", "character"]
 right = ["duration", "status"]
+add_newline = false        # blank line before each prompt
+# Drawn between segments in the colors of both: foreground = background of
+# the segment before, background = background of the segment after
+# (segments get a background from a "bg:" in their style). A powerline
+# glyph like "\ue0b4" turns bg-styled segments into joined blocks.
+separator = " "
+padding = ""               # inside each segment, on its background
 
 [directory]
 truncate = 4               # path components kept (0: all)
@@ -73,8 +83,7 @@ style = "yellow"
 style = "bold red"
 "##;
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Segment {
     Directory,
     Git,
@@ -82,6 +91,51 @@ pub enum Segment {
     Character,
     Duration,
     Status,
+    Newline,
+    Text(Text),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Text {
+    pub text: String,
+    #[serde(default)]
+    pub style: Style,
+}
+
+const SEGMENT_NAMES: &[&str] = &["directory", "git", "toolchains", "character", "duration", "status", "newline"];
+
+/// A name ("git") or a text table ({ text = "x", style = "red" }).
+impl<'de> Deserialize<'de> for Segment {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Segment;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a segment name or { text = \"...\", style = \"...\" }")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Segment, E> {
+                use Segment::*;
+                Ok(match v {
+                    "directory" => Directory,
+                    "git" => Git,
+                    "toolchains" => Toolchains,
+                    "character" => Character,
+                    "duration" => Duration,
+                    "status" => Status,
+                    "newline" => Newline,
+                    _ => return Err(E::unknown_variant(v, SEGMENT_NAMES)),
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, m: A) -> Result<Segment, A::Error> {
+                Text::deserialize(de::value::MapAccessDeserializer::new(m)).map(Segment::Text)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -89,6 +143,9 @@ pub enum Segment {
 pub struct Config {
     pub left: Vec<Segment>,
     pub right: Vec<Segment>,
+    pub add_newline: bool,
+    pub separator: String,
+    pub padding: String,
     pub directory: Directory,
     pub git: Git,
     pub toolchains: Toolchains,
@@ -185,6 +242,9 @@ impl Default for Config {
         Self {
             left: vec![Directory, Git, Toolchains, Character],
             right: vec![Duration, Status],
+            add_newline: false,
+            separator: s(" "),
+            padding: String::new(),
             directory: Default::default(),
             git: Default::default(),
             toolchains: Default::default(),
@@ -286,6 +346,9 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self, String> {
         let cfg: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        if cfg.right.contains(&Segment::Newline) {
+            return Err("`newline` only works in `left`".into());
+        }
         for name in cfg.toolchains.tools.keys() {
             if !TOOLS.iter().any(|t| t.name == name) {
                 let known: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
@@ -310,66 +373,90 @@ impl Config {
     }
 }
 
-/// An SGR parameter string ("1;36"), parsed from Starship-like words.
+/// Parsed from Starship-like words. `sgr` is the SGR parameter string
+/// ("1;36"); `bg` the background, which makes the segment a colored block.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct Style(pub String);
+pub struct Style {
+    pub sgr: String,
+    pub bg: Option<Color>,
+}
 
-impl Style {
-    pub fn parse(spec: &str) -> Result<Self, String> {
-        let mut out = String::new();
-        let mut push = |code: &str| {
-            if !out.is_empty() {
-                out.push(';');
-            }
-            out.push_str(code);
-        };
-        for word in spec.split_whitespace() {
-            let w = word.to_ascii_lowercase();
-            let code = match w.as_str() {
-                "none" => continue,
-                "bold" => "1".into(),
-                "dim" => "2".into(),
-                "italic" => "3".into(),
-                "underline" => "4".into(),
-                "blink" => "5".into(),
-                "inverted" => "7".into(),
-                "hidden" => "8".into(),
-                "strikethrough" => "9".into(),
-                _ => {
-                    let (bg, color) = match w.split_once(':') {
-                        Some(("fg", c)) => (false, c),
-                        Some(("bg", c)) => (true, c),
-                        Some(_) => return Err(format!("bad style word `{word}`")),
-                        None => (false, w.as_str()),
-                    };
-                    color_code(color, bg).ok_or_else(|| format!("unknown color `{word}`"))?
-                }
-            };
-            push(&code);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    Basic(u8),
+    Bright(u8),
+    Fixed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl Color {
+    fn parse(c: &str) -> Option<Self> {
+        const NAMES: [&str; 8] = ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"];
+        let name = |n: &str| NAMES.iter().position(|x| *x == n).or_else(|| (n == "magenta").then_some(5));
+        if let Some(i) = name(c) {
+            return Some(Self::Basic(i as u8));
         }
-        Ok(Style(out))
+        if let Some(i) = c.strip_prefix("bright-").and_then(name) {
+            return Some(Self::Bright(i as u8));
+        }
+        if let Ok(n) = c.parse::<u8>() {
+            return Some(Self::Fixed(n));
+        }
+        let hex = c.strip_prefix('#').filter(|h| h.len() == 6)?;
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        Some(Self::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    }
+
+    /// Appends the SGR code selecting this color as foreground or background.
+    pub fn write(self, bg: bool, out: &mut String) {
+        let (base, ext) = if bg { (40, 48) } else { (30, 38) };
+        let _ = match self {
+            Self::Basic(i) => write!(out, "{}", base + i as u32),
+            Self::Bright(i) => write!(out, "{}", base + 60 + i as u32),
+            Self::Fixed(n) => write!(out, "{ext};5;{n}"),
+            Self::Rgb(r, g, b) => write!(out, "{ext};2;{r};{g};{b}"),
+        };
     }
 }
 
-fn color_code(c: &str, bg: bool) -> Option<String> {
-    const NAMES: [&str; 8] = ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"];
-    let base = if bg { 40 } else { 30 };
-    let ext = if bg { 48 } else { 38 };
-    let name = |n: &str| NAMES.iter().position(|x| *x == n).or_else(|| (n == "magenta").then_some(5));
-    if let Some(i) = name(c) {
-        return Some((base + i).to_string());
+impl Style {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut st = Style::default();
+        for word in spec.split_whitespace() {
+            let w = word.to_ascii_lowercase();
+            let attr = match w.as_str() {
+                "none" => continue,
+                "bold" => "1",
+                "dim" => "2",
+                "italic" => "3",
+                "underline" => "4",
+                "blink" => "5",
+                "inverted" => "7",
+                "hidden" => "8",
+                "strikethrough" => "9",
+                _ => "",
+            };
+            if !st.sgr.is_empty() {
+                st.sgr.push(';');
+            }
+            if !attr.is_empty() {
+                st.sgr.push_str(attr);
+                continue;
+            }
+            let (bg, color) = match w.split_once(':') {
+                Some(("fg", c)) => (false, c),
+                Some(("bg", c)) => (true, c),
+                Some(_) => return Err(format!("bad style word `{word}`")),
+                None => (false, w.as_str()),
+            };
+            let c = Color::parse(color).ok_or_else(|| format!("unknown color `{word}`"))?;
+            c.write(bg, &mut st.sgr);
+            if bg {
+                st.bg = Some(c);
+            }
+        }
+        Ok(st)
     }
-    if let Some(i) = c.strip_prefix("bright-").and_then(name) {
-        return Some((base + 60 + i).to_string());
-    }
-    if let Ok(n) = c.parse::<u8>() {
-        return Some(format!("{ext};5;{n}"));
-    }
-    let hex = c.strip_prefix('#').filter(|h| h.len() == 6)?;
-    let v = u32::from_str_radix(hex, 16).ok()?;
-    let mut s = String::new();
-    let _ = write!(s, "{ext};2;{};{};{}", v >> 16, (v >> 8) & 0xff, v & 0xff);
-    Some(s)
 }
 
 impl<'de> Deserialize<'de> for Style {
@@ -395,7 +482,7 @@ mod tests {
         assert!(c.right.is_empty());
         assert_eq!(c.git.staged, "S");
         assert_eq!(c.git.modified, "!");
-        assert_eq!(c.git.staged_style, Style("32".into()));
+        assert_eq!(c.git.staged_style.sgr, "32");
         assert!(!c.toolchains.enabled("java"));
         assert!(c.toolchains.enabled("rust"));
         assert_eq!(c.left, Config::default().left);
@@ -415,7 +502,7 @@ mod tests {
 
     #[test]
     fn styles() {
-        let p = |s: &str| Style::parse(s).unwrap().0;
+        let p = |s: &str| Style::parse(s).unwrap().sgr;
         assert_eq!(p("bold cyan"), "1;36");
         assert_eq!(p("bright-red"), "91");
         assert_eq!(p("bg:blue fg:208"), "44;38;5;208");
@@ -425,5 +512,25 @@ mod tests {
         assert_eq!(p("magenta"), "35");
         assert!(Style::parse("fg:#12").is_err());
         assert!(Style::parse("xx:red").is_err());
+        assert_eq!(Style::parse("red bg:#010203").unwrap().bg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(Style::parse("bg:bright-red").unwrap().bg, Some(Color::Bright(1)));
+        assert_eq!(Style::parse("bold red").unwrap().bg, None);
+    }
+
+    #[test]
+    fn text_and_newline_segments() {
+        let c = Config::parse(
+            "left = [{ text = \"cap\", style = \"bg:#1a1a1a\" }, \"directory\", \"newline\", \"character\"]\n",
+        )
+        .unwrap();
+        let Segment::Text(t) = &c.left[0] else { panic!() };
+        assert_eq!((t.text.as_str(), t.style.bg), ("cap", Some(Color::Rgb(26, 26, 26))));
+        assert_eq!(c.left[2], Segment::Newline);
+        let e = Config::parse("left = [{ txt = \"x\" }]\n").unwrap_err();
+        assert!(e.contains("txt"), "{e}");
+        let e = Config::parse("left = [{ style = \"red\" }]\n").unwrap_err();
+        assert!(e.contains("text"), "{e}");
+        let e = Config::parse("right = [\"newline\"]\n").unwrap_err();
+        assert!(e.contains("newline"), "{e}");
     }
 }

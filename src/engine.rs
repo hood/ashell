@@ -94,13 +94,19 @@ impl Engine {
         lap("toolchains kick", &mut timings);
 
         let mut pending = false;
-        let mut lines = [Line::new(shell), Line::new(shell)];
+        let new_line = || Line::new(shell, &cfg.separator, &cfg.padding);
+        let mut lines = [new_line(), new_line()];
+        if cfg.add_newline {
+            lines[0].newline();
+        }
         if self.config_error.is_some() {
-            lines[0].seg("1;33", "⚠ config"); // details: `ashell config check`
+            lines[0].begin();
+            lines[0].seg_raw("1;33", None, "⚠ config"); // details: `ashell config check`
         }
         for (i, side) in [&cfg.left, &cfg.right].into_iter().enumerate() {
             let l = &mut lines[i];
             for seg in side {
+                l.begin();
                 match seg {
                     Segment::Directory => {
                         let r = repo.as_deref().filter(|_| cfg.directory.repo_relative);
@@ -125,8 +131,15 @@ impl Engine {
                     Segment::Character => character(l, &cfg.character, req),
                     Segment::Duration => duration(l, &cfg.duration, req),
                     Segment::Status => status(l, &cfg.status, req),
+                    Segment::Newline => l.newline(),
+                    Segment::Text(t) => {
+                        if !t.text.is_empty() {
+                            l.seg(&t.style, &t.text);
+                        }
+                    }
                 }
             }
+            l.end();
         }
         let [mut left, right] = lines;
         if !left.buf.is_empty() {
@@ -162,25 +175,25 @@ fn directory(l: &mut Line, cfg: &config::Directory, cwd: &Path, home: Option<&st
     let parts: Vec<&str> = shown.split('/').collect();
     let keep = cfg.truncate;
     if keep > 0 && parts.len() > keep {
-        l.seg(&cfg.style.0, &format!("{}{}", cfg.truncation_symbol, parts[parts.len() - keep..].join("/")));
+        l.seg(&cfg.style, &format!("{}{}", cfg.truncation_symbol, parts[parts.len() - keep..].join("/")));
     } else {
-        l.seg(&cfg.style.0, &shown);
+        l.seg(&cfg.style, &shown);
     }
 }
 
 /// Returns true when the status part is still pending.
 fn git_segment(l: &mut Line, cfg: &config::Git, repo: &Arc<Repo>, deadline: Duration, since: Instant) -> bool {
     match repo.head() {
-        Some(Head::Branch(b)) => l.seg(&cfg.branch_style.0, &format!("{}{b}", cfg.branch_symbol)),
+        Some(Head::Branch(b)) => l.seg(&cfg.branch_style, &format!("{}{b}", cfg.branch_symbol)),
         Some(Head::Detached(h)) => {
-            l.seg(&cfg.branch_style.0, &format!("{}{}{h}", cfg.branch_symbol, cfg.detached_prefix))
+            l.seg(&cfg.branch_style, &format!("{}{}{h}", cfg.branch_symbol, cfg.detached_prefix))
         }
         None => return false,
     }
     let (st, fresh) = repo.status(deadline, since);
     let stale = !matches!(fresh, Freshness::Fresh);
     let Some(st) = st else {
-        l.seg(&cfg.stale_style.0, &cfg.pending_symbol);
+        l.seg(&cfg.stale_style, &cfg.pending_symbol);
         return true;
     };
     let stash = repo.stash_count() as u32;
@@ -200,7 +213,7 @@ fn git_segment(l: &mut Line, cfg: &config::Git, repo: &Arc<Repo>, deadline: Dura
         }
         let style = if stale { &cfg.stale_style } else { style };
         let text = format!("{sym}{n}");
-        if first { l.seg(&style.0, &text) } else { l.styled(&style.0, &text) }
+        if first { l.seg(style, &text) } else { l.styled(style, &text) }
         first = false;
     }
     stale
@@ -212,7 +225,7 @@ fn character(l: &mut Line, cfg: &config::Character, req: &Request) {
         (false, true) => (&cfg.success_symbol, &cfg.success_style),
         (false, false) => (&cfg.error_symbol, &cfg.error_style),
     };
-    l.seg(&style.0, sym);
+    l.seg(style, sym);
 }
 
 fn duration(l: &mut Line, cfg: &config::Duration, req: &Request) {
@@ -223,7 +236,7 @@ fn duration(l: &mut Line, cfg: &config::Duration, req: &Request) {
         60..3600 => format!("{}m{}s", s / 60, s % 60),
         _ => format!("{}h{}m", s / 3600, (s % 3600) / 60),
     };
-    l.seg(&cfg.style.0, &text);
+    l.seg(&cfg.style, &text);
 }
 
 fn status(l: &mut Line, cfg: &config::Status, req: &Request) {
@@ -233,6 +246,6 @@ fn status(l: &mut Line, cfg: &config::Status, req: &Request) {
             n if n > 128 => format!("SIG{}", n - 128),
             n => n.to_string(),
         };
-        l.seg(&cfg.style.0, &text);
+        l.seg(&cfg.style, &text);
     }
 }

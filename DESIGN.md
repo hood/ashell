@@ -370,7 +370,16 @@ since M1. Now sliced by length. Per prompt (`bench/precmd.zsh`, run with
 `~/.config/ashell/config.toml`. TOML, every key optional.
 
 - Layout: `left` / `right` segment lists (order; leaving one out disables
-  it and skips its work, e.g. no toolchain runs).
+  it and skips its work, e.g. no toolchain runs). Extra entries:
+  `"newline"` (left only) and literal `{ text = "...", style = "..." }`.
+  `add_newline` puts a blank line before the prompt.
+- Blocks: `separator` (default `" "`) goes between segments with
+  fg = previous segment's background, bg = next one's; a `bg:` in a
+  segment's first style gives it a background, pieces without their own
+  `bg:` inherit it, `padding` goes inside colored segments. A colored
+  segment at a line end is capped with the separator. With `""`
+  this is Starship's powerline look; segments that print nothing leave
+  no separator.
 - Per segment: symbols and styles for directory (truncation, home symbol,
   repo-relative), git (branch symbol, each status mark), toolchains
   (version prefix; per tool `disabled` / `symbol` / `style`), character,

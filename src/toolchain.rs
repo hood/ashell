@@ -503,7 +503,7 @@ impl Toolchains {
             let t = &TOOLS[*tool];
             let over = cfg.tool(t.name);
             let symbol = over.and_then(|o| o.symbol.as_deref()).unwrap_or(t.symbol);
-            let color = over.and_then(|o| o.style.as_ref()).map_or(t.color, |s| s.0.as_str());
+            let (sgr, bg) = over.and_then(|o| o.style.as_ref()).map_or((t.color, None), |s| (s.sgr.as_str(), s.bg));
             let version = s.value.as_ref().and_then(|v| v.as_deref());
             let mut text = match version {
                 Some(v) => format!("{symbol}{}{v}", cfg.version_prefix),
@@ -518,7 +518,7 @@ impl Toolchains {
                 text.push_str(&format!(" ({venv})"));
             }
             if !text.is_empty() {
-                l.seg(color, &text);
+                l.seg_raw(sgr, bg, &text);
             }
         }
         pending
@@ -672,7 +672,8 @@ mod tests {
                 s = e.cv.wait(s).unwrap();
             }
         }
-        let mut l = Line::new(crate::render::Shell::Plain);
+        let mut l = Line::new(crate::render::Shell::Plain, " ", "");
+        l.begin();
         assert!(!tc.render(&mut l, &started, req, None, &cfg));
         l.buf
     }
