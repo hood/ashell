@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::git::{self, Freshness, Head, Repo};
 use crate::protocol::Request;
-use crate::config::{self, Config, Segment};
+use crate::config::{self, Config, Mark, Segment};
 use crate::render::{Line, Shell};
 use crate::toolchain::Toolchains;
 
@@ -198,21 +198,21 @@ fn git_segment(l: &mut Line, cfg: &config::Git, repo: &Arc<Repo>, deadline: Dura
     };
     let stash = repo.stash_count() as u32;
     let marks = [
-        (st.conflicted, &cfg.conflicted, &cfg.conflicted_style),
-        (st.staged, &cfg.staged, &cfg.staged_style),
-        (st.modified, &cfg.modified, &cfg.modified_style),
-        (st.untracked, &cfg.untracked, &cfg.untracked_style),
-        (st.ahead, &cfg.ahead, &cfg.sync_style),
-        (st.behind, &cfg.behind, &cfg.sync_style),
-        (stash, &cfg.stash, &cfg.stash_style),
+        (Mark::Conflicted, st.conflicted, &cfg.conflicted, &cfg.conflicted_style),
+        (Mark::Staged, st.staged, &cfg.staged, &cfg.staged_style),
+        (Mark::Modified, st.modified, &cfg.modified, &cfg.modified_style),
+        (Mark::Untracked, st.untracked, &cfg.untracked, &cfg.untracked_style),
+        (Mark::Ahead, st.ahead, &cfg.ahead, &cfg.sync_style),
+        (Mark::Behind, st.behind, &cfg.behind, &cfg.sync_style),
+        (Mark::Stash, stash, &cfg.stash, &cfg.stash_style),
     ];
     let mut first = true;
-    for (n, sym, style) in marks {
+    for (mark, n, sym, style) in marks {
         if n == 0 {
             continue;
         }
         let style = if stale { &cfg.stale_style } else { style };
-        let text = format!("{sym}{n}");
+        let text = if cfg.hide_counts.contains(&mark) { sym.clone() } else { format!("{sym}{n}") };
         if first { l.seg(style, &text) } else { l.styled(style, &text) }
         first = false;
     }

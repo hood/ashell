@@ -382,7 +382,7 @@ since M1. Now sliced by length. Per prompt (`bench/precmd.zsh`, run with
   no separator. Example: `examples/powerline.toml` (a test keeps it
   parsing).
 - Per segment: symbols and styles for directory (truncation, home symbol,
-  repo-relative), git (branch symbol, each status mark), toolchains
+  repo-relative), git (branch symbol, each status mark, `hide_counts`), toolchains
   (version prefix; per tool `disabled` / `symbol` / `style`), character,
   duration (`min_ms`), status.
 - Styles parse Starship-like words: `bold cyan`, `bright-red`, `fg:208`,

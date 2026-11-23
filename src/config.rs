@@ -59,6 +59,7 @@ behind = "⇣"
 sync_style = "cyan"
 stash = "*"
 stash_style = "white"
+hide_counts = []           # marks shown without their count, e.g. ["stash"]
 
 [toolchains]
 version_prefix = "v"
@@ -185,6 +186,19 @@ pub struct Git {
     pub sync_style: Style,
     pub stash: String,
     pub stash_style: Style,
+    pub hide_counts: Vec<Mark>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mark {
+    Conflicted,
+    Staged,
+    Modified,
+    Untracked,
+    Ahead,
+    Behind,
+    Stash,
 }
 
 /// No `deny_unknown_fields`: serde can't combine it with `flatten`. Unknown
@@ -288,6 +302,7 @@ impl Default for Git {
             sync_style: st("cyan"),
             stash: s("*"),
             stash_style: st("white"),
+            hide_counts: Vec::new(),
         }
     }
 }
@@ -480,6 +495,14 @@ mod tests {
     fn examples_parse() {
         let c = Config::parse(include_str!("../examples/powerline.toml")).unwrap();
         assert!(c.left.contains(&Segment::Newline));
+    }
+
+    #[test]
+    fn hide_counts() {
+        let c = Config::parse("[git]\nhide_counts = [\"stash\", \"ahead\"]\n").unwrap();
+        assert_eq!(c.git.hide_counts, [Mark::Stash, Mark::Ahead]);
+        let e = Config::parse("[git]\nhide_counts = [\"stashes\"]\n").unwrap_err();
+        assert!(e.contains("stashes"), "{e}");
     }
 
     #[test]

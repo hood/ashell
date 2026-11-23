@@ -30,3 +30,4 @@ modified_style = "fg:#1B2B34"
 sync_style = "fg:#1B2B34"
 stash = "$"
 stash_style = "fg:#1B2B34"
+hide_counts = ["stash"]
