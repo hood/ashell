@@ -379,7 +379,8 @@ since M1. Now sliced by length. Per prompt (`bench/precmd.zsh`, run with
   `bg:` inherit it, `padding` goes inside colored segments. A colored
   segment at a line end is capped with the separator. With `""`
   this is Starship's powerline look; segments that print nothing leave
-  no separator.
+  no separator. Example: `examples/powerline.toml` (a test keeps it
+  parsing).
 - Per segment: symbols and styles for directory (truncation, home symbol,
   repo-relative), git (branch symbol, each status mark), toolchains
   (version prefix; per tool `disabled` / `symbol` / `style`), character,

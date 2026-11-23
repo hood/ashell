@@ -1,0 +1,32 @@
+# Mirrors the starship layout (cap | directory | git, input on line 2),
+# blue/teal palette instead of grey/red to tell them apart.
+
+left = [
+  { text = "cap", style = "bg:#1B2B34 fg:#C0C5CE" },
+  "directory",
+  "git",
+  "newline",
+]
+right = []
+add_newline = true
+separator = ""
+padding = " "
+
+[directory]
+truncate = 3
+truncation_symbol = "…/"
+home_symbol = "~"
+repo_relative = true
+style = "bg:#2B4A5E fg:#E0E6EB"
+
+[git]
+branch_symbol = " "
+branch_style = "bg:#5FB3B3 fg:#1B2B34"
+stale_style = "dim fg:#1B2B34"
+conflicted_style = "fg:#1B2B34"
+staged_style = "fg:#1B2B34"
+untracked_style = "fg:#1B2B34"
+modified_style = "fg:#1B2B34"
+sync_style = "fg:#1B2B34"
+stash = "$"
+stash_style = "fg:#1B2B34"

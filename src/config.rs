@@ -477,6 +477,12 @@ mod tests {
     }
 
     #[test]
+    fn examples_parse() {
+        let c = Config::parse(include_str!("../examples/powerline.toml")).unwrap();
+        assert!(c.left.contains(&Segment::Newline));
+    }
+
+    #[test]
     fn partial_override_keeps_other_defaults() {
         let c = Config::parse("right = []\n[git]\nstaged = \"S\"\n[toolchains.java]\ndisabled = true\n").unwrap();
         assert!(c.right.is_empty());
