@@ -47,10 +47,17 @@ nav ul a:hover{color:var(--paper)}
 @media (max-width:860px){nav ul{display:none}.gh{margin-left:auto}}
 
 /* hero */
-.hero{padding-top:88px;padding-bottom:40px}
+.hero{padding-top:40px;padding-bottom:40px}
+.mark{position:relative;height:clamp(96px,24vw,330px);margin:0 -8px 8px;cursor:crosshair}
+.mark canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.mark .fallback{position:absolute;inset:0;display:flex;align-items:center;font:800 clamp(110px,20vw,280px)/1 var(--mono);letter-spacing:-.07em;color:var(--lime);padding-left:8px}
+.mark.gl .fallback{visibility:hidden}
+.mark-cap{display:flex;justify-content:space-between;gap:16px;font:12px var(--mono);color:var(--faint);border-top:1px solid var(--line);padding-top:10px;margin-bottom:36px}
+.mark-cap b{color:var(--lime);font-weight:500}
+@media (max-width:640px){.mark-cap span:last-child{display:none}}
 .eyebrow{display:inline-flex;align-items:center;gap:10px;font-family:var(--mono);font-size:13px;color:var(--lime);border:1px solid #c8ff3c44;background:var(--lime-dim);padding:6px 12px;border-radius:999px}
 .eyebrow i{width:7px;height:7px;border-radius:50%;background:var(--lime)}
-h1{font-family:var(--display);font-weight:800;font-size:clamp(40px,7.4vw,96px);line-height:.98;letter-spacing:-.065em;margin:26px 0 26px}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(34px,5.6vw,72px);line-height:.98;letter-spacing:-.065em;margin:26px 0 26px}
 h1 em{font-style:normal;color:var(--lime)}
 h1 .num{color:var(--lime)}
 h1 .quiet{color:var(--faint)}
@@ -255,6 +262,8 @@ footer .wrap{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between}
 
 <main>
 <header class="hero wrap">
+  <div class="mark" id="mark" aria-hidden="true"><canvas id="markgl"></canvas><div class="fallback">ashell</div></div>
+  <div class="mark-cap"><span id="markstate"><b>●</b> frame 1 · cached</span><span>webgl · hover to perturb the cache</span></div>
   <span class="eyebrow"><i></i>zsh · Rust · zero forks per prompt</span>
   <h1>Your prompt<br>in <span class="num">115µs</span>.<br><span class="quiet">Never blocks.</span></h1>
   <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. It draws <strong>frame&nbsp;1 instantly</strong> from cache, then patches in slow stuff like git status as it lands. Nothing on the critical path spawns a process, so even in a 23k-file repo the whole round trip takes <strong>0.115&nbsp;ms</strong>.</p>
@@ -597,6 +606,106 @@ const io=new IntersectionObserver(es=>es.forEach(e=>{if(!e.isIntersecting)return
 $$('.reveal').forEach(r=>io.observe(r));
 function countUp(b){const to=+b.dataset.count,small=b.querySelector('small').outerHTML,t0=performance.now(),d=1300;
   const f=now=>{const k=Math.min(1,(now-t0)/d),e=1-Math.pow(1-k,3);b.innerHTML=Math.round(to*e).toLocaleString('en')+small;if(k<1)requestAnimationFrame(f)};requestAnimationFrame(f)}
+
+// ---------- hero wordmark shader ----------
+(()=>{
+  const wrap=$('#mark'), cv=$('#markgl'), state=$('#markstate');
+  const gl=cv.getContext('webgl',{premultipliedAlpha:true,antialias:false,alpha:true});
+  if(!gl)return;
+  const VS=`attribute vec2 p;varying vec2 vUv;void main(){vUv=p*.5+.5;gl_Position=vec4(p,0.,1.);}`;
+  const FS=`precision highp float;
+  uniform sampler2D uTex;uniform vec2 uRes;uniform float uT;uniform vec2 uMouse;uniform float uHover;
+  varying vec2 vUv;
+  float h(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+  float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+    return mix(mix(h(i),h(i+vec2(1,0)),f.x),mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x),f.y);}
+  float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<5;i++){v+=a*n(p);p=p*2.03+17.1;a*=.5;}return v;}
+  void main(){
+    vec2 uv=vUv; float asp=uRes.x/uRes.y;
+    vec2 p=vec2(uv.x*asp,uv.y), m=vec2(uMouse.x*asp,uMouse.y);
+    float d=length(p-m);
+    float infl=uHover*smoothstep(.55,0.,d);
+    float flow=fbm(p*2.2+vec2(uT*.09,-uT*.05));
+    vec2 warp=(vec2(fbm(p*3.1+uT*.25),fbm(p*3.1+7.3-uT*.25))-.5)*(.006+.07*infl);
+    vec2 q=uv+warp;
+    float split=.0012+.014*infl;
+    float r=texture2D(uTex,q+vec2(split,0.)).r;
+    float g=texture2D(uTex,q).r;
+    float b=texture2D(uTex,q-vec2(split,0.)).r;
+    float soft=texture2D(uTex,uv).g;
+    // the scan: every 3.6s a frame sweeps left to right in 0.45s, then letters go stale
+    float P=3.6, tt=mod(uT,P), age=tt-uv.x*.45-.05*flow;
+    if(age<0.)age+=P;
+    float fresh=max(exp(-age*.32),infl);
+    float edge=exp(-age*70.)*step(0.,age);
+    vec3 lime=vec3(.784,1.,.235), paper=vec3(.925,.922,.894), stale=vec3(.34,.36,.40);
+    vec3 hot=mix(lime,paper,.55*smoothstep(.55,.8,flow));
+    vec3 fill=mix(stale+.05*flow,hot,clamp(fresh*1.25+.08,0.,1.));
+    fill=min(fill+edge*.7,vec3(1.));
+    fill*=.82+.18*sin(gl_FragCoord.y*1.7);
+    vec3 col=vec3(r*fill.r,g*fill.g,b*fill.b);
+    float a=max(max(r,g),b);
+    vec2 cell=fract(gl_FragCoord.xy/7.)-.5;
+    float dotm=smoothstep(.2,.1,length(cell));
+    float vig=smoothstep(0.,.06,uv.x)*smoothstep(1.,.94,uv.x)*smoothstep(0.,.12,uv.y)*smoothstep(1.,.88,uv.y);
+    float halo=soft*soft*vig*(1.-a)*dotm*(.08+.45*fresh+.6*edge);
+    col+=lime*halo; a=max(a,halo);
+    gl_FragColor=vec4(col,a);
+  }`;
+  const sh=(t,src)=>{const o=gl.createShader(t);gl.shaderSource(o,src);gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(o);return o};
+  let prog;
+  try{prog=gl.createProgram();gl.attachShader(prog,sh(gl.VERTEX_SHADER,VS));gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(prog);if(!gl.getProgramParameter(prog,gl.LINK_STATUS))throw 0}catch(e){return}
+  gl.useProgram(prog);
+  const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(prog,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  const U=k=>gl.getUniformLocation(prog,k), uRes=U('uRes'),uT=U('uT'),uMouse=U('uMouse'),uHover=U('uHover');
+  const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  const off=document.createElement('canvas'), c2=off.getContext('2d');
+  function bake(){
+    const dpr=Math.min(devicePixelRatio||1,2), w=Math.round(wrap.clientWidth*dpr), h=Math.round(wrap.clientHeight*dpr);
+    if(!w||!h)return;
+    cv.width=off.width=w;cv.height=off.height=h;gl.viewport(0,0,w,h);
+    const font=s=>`800 ${s}px "JetBrains Mono", ui-monospace, monospace`;
+    c2.font=font(100);if('letterSpacing' in c2)c2.letterSpacing='-7px';
+    const m0=c2.measureText('ashell'), asc0=m0.actualBoundingBoxAscent||72, des0=m0.actualBoundingBoxDescent||2;
+    const fs=Math.min(100*(w*.985)/m0.width,100*(h*.84)/(asc0+des0));
+    c2.clearRect(0,0,w,h);c2.font=font(fs);if('letterSpacing' in c2)c2.letterSpacing=(-.07*fs)+'px';
+    let mm=c2.measureText('ashell'), bw=(mm.actualBoundingBoxLeft||0)+(mm.actualBoundingBoxRight||mm.width);
+    if(bw>w*.97){const k=w*.97/bw;c2.font=font(fs*k);if('letterSpacing' in c2)c2.letterSpacing=(-.07*fs*k)+'px';mm=c2.measureText('ashell')}
+    const asc=mm.actualBoundingBoxAscent||fs*.72, des=mm.actualBoundingBoxDescent||0;
+    c2.textBaseline='alphabetic';const x=8*dpr+(mm.actualBoundingBoxLeft||0),y=(h+asc-des)/2;
+    c2.globalCompositeOperation='lighter';
+    c2.shadowColor='#00ff00';c2.shadowBlur=fs*.22;c2.fillStyle='#000000';c2.fillText('ashell',x,y);
+    c2.shadowBlur=0;c2.fillStyle='#ff0000';c2.fillText('ashell',x,y);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,off);
+    gl.uniform2f(uRes,w,h);
+  }
+  let mx=.5,my=.5,hover=0,target=0,visible=true,t0=performance.now(),raf=0,last='';
+  wrap.addEventListener('pointermove',e=>{const r=wrap.getBoundingClientRect();mx=(e.clientX-r.left)/r.width;my=1-(e.clientY-r.top)/r.height;target=1});
+  wrap.addEventListener('pointerleave',()=>target=0);
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function frame(now){
+    const t=reduce?.35:(now-t0)/1000;
+    hover+=(target-hover)*.08;
+    gl.uniform1f(uT,t);gl.uniform2f(uMouse,mx,my);gl.uniform1f(uHover,hover);
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    const ph=(t%3.6), lbl=hover>.5?'<b style="color:var(--purple)">●</b> cache perturbed · recomputing':ph<.5?'<b>●</b> patch frame · fresh':ph<2.4?'<b>●</b> frame 1 · cached':'<b style="color:var(--faint)">●</b> frame 1 · going stale';
+    if(lbl!==last){state.innerHTML=lbl;last=lbl}
+    if(!reduce&&visible&&!document.hidden)raf=requestAnimationFrame(frame);else raf=0;
+  }
+  const kick=()=>{if(!raf&&!reduce&&visible&&!document.hidden)raf=requestAnimationFrame(frame)};
+  new IntersectionObserver(e=>{visible=e[0].isIntersecting;kick()}).observe(wrap);
+  document.addEventListener('visibilitychange',kick);
+  let rt;new ResizeObserver(()=>{clearTimeout(rt);rt=setTimeout(()=>{bake();if(reduce)frame(0)},60)}).observe(wrap);
+  (document.fonts?document.fonts.load('800 100px "JetBrains Mono"'):Promise.resolve()).catch(()=>{}).then(()=>{
+    bake();wrap.classList.add('gl');
+    if(reduce)frame(0);else kick();
+  });
+})();
 </script>
 </body>
 </html>
