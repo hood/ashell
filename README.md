@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://hood.github.io/ashell/"><img src="https://img.shields.io/badge/site-hood.github.io%2Fashell-c8ff3c?style=flat-square&labelColor=0a0b0d" alt="website"></a>
-  <img src="https://img.shields.io/badge/rust-2024-ff5d3a?style=flat-square&labelColor=0a0b0d&logo=rust" alt="rust 2024">
+  <img src="https://img.shields.io/badge/rust-1.88%2B-ff5d3a?style=flat-square&labelColor=0a0b0d&logo=rust" alt="rust 1.88+">
   <img src="https://img.shields.io/badge/shell-zsh-82aaff?style=flat-square&labelColor=0a0b0d" alt="zsh">
   <img src="https://img.shields.io/badge/forks%20per%20prompt-0-c8ff3c?style=flat-square&labelColor=0a0b0d" alt="0 forks per prompt">
   <img src="https://img.shields.io/badge/license-MIT-9a9fa8?style=flat-square&labelColor=0a0b0d" alt="MIT">
@@ -15,9 +15,12 @@
 **TLDR:** a tiny per-user Rust daemon keeps your prompt's state warm. zsh talks to it over a unix socket with builtins only (zero forks), gets **frame 1 in ~115 µs** from cache, and gets patched as slow stuff like git status finishes. Even in a 23k-file repo, your prompt never waits on git.
 
 ```sh
-cargo install --git https://github.com/hood/ashell
+cargo install --locked --git https://github.com/hood/ashell
 echo 'eval "$(ashell init zsh)"' >> ~/.zshrc
 ```
+
+> [!NOTE]
+> Needs **Rust 1.88+** (`rustc --version`; upgrade with `rustup update`). Older toolchains stop before compiling with `ashell requires rustc 1.88`.
 
 ---
 

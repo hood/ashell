@@ -282,7 +282,7 @@ try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches&&!location.hash&&
   <h1>Your prompt in <span class="num">115µs</span>.<br><span class="quiet">Never blocks.</span></h1>
   <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. It draws <strong>frame&nbsp;1 instantly</strong> from cache, then patches in slow stuff like git status as it lands. Nothing on the critical path spawns a process, so even in a 23k-file repo the whole round trip takes <strong>0.115&nbsp;ms</strong>.</p>
   <div class="cta">
-    <div class="install"><code><span>$</span> cargo install --git https://github.com/hood/ashell</code><button class="copy" data-copy="cargo install --git https://github.com/hood/ashell">copy</button></div>
+    <div class="install"><code><span>$</span> cargo install --locked --git https://github.com/hood/ashell</code><button class="copy" data-copy="cargo install --locked --git https://github.com/hood/ashell">copy</button></div>
     <a class="btn" href="#how">How it works →</a>
   </div>
 
@@ -443,7 +443,7 @@ try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches&&!location.hash&&
     <h2>Two lines. <em>Done.</em></h2>
   </div>
   <div class="steps">
-    <div class="step reveal"><div><h3>Build it</h3><p>Rust 2024 edition. Release profile is fat LTO, single codegen unit, <code>panic = "abort"</code>.</p><pre>cargo install --git https://github.com/hood/ashell</pre></div></div>
+    <div class="step reveal"><div><h3>Build it</h3><p>Needs <b>Rust 1.88+</b> (<code>rustup update</code> if <code>rustc --version</code> is older). Release profile is fat LTO, single codegen unit, <code>panic = "abort"</code>.</p><pre>cargo install --locked --git https://github.com/hood/ashell</pre></div></div>
     <div class="step reveal"><div><h3>Hook it into zsh</h3><p>Add to <code>~/.zshrc</code>. The daemon starts itself on the first prompt.</p><pre>eval "$(ashell init zsh)"</pre></div></div>
     <div class="step reveal"><div><h3>Make it yours (optional)</h3><p>Dump the documented defaults, edit, then <code>ashell stop</code> to reload.</p><pre>ashell config default &gt; ~/.config/ashell/config.toml
 ashell config check
