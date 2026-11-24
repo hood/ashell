@@ -280,7 +280,7 @@ try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches&&!location.hash&&
   <div class="mark" id="mark" aria-hidden="true"><canvas id="markgl"></canvas><div class="fallback">ashell</div></div>
   <div class="mark-cap"><span id="markstate"><b>●</b> frame 1 · cached</span></div>
   <h1>Your prompt,<br><span class="num">blazingly fast.</span></h1>
-  <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. Performance is a first class citizen here, so <strong>frame&nbsp;1 lands in ~115&nbsp;µs</strong>, slow stuff like git status patches in as it finishes, and nothing on the critical path ever spawns a process, even in a 23k-file repo.</p>
+  <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. Performance is a first class citizen here, so your prompt shows up in <strong>~115&nbsp;µs</strong>, git status fills in as soon as it's ready, and drawing it never spawns a process, even in huge repos.</p>
   <div class="cta">
     <div class="install"><code><span>$</span> cargo install --locked --git https://github.com/hood/ashell</code><button class="copy" data-copy="cargo install --locked --git https://github.com/hood/ashell">copy</button></div>
     <a class="btn" href="#how">How it works →</a>
