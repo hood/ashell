@@ -219,4 +219,4 @@ Deep dive, design decisions and every measurement: [`DESIGN.md`](DESIGN.md).
 
 ## License
 
-MIT
+[MIT](LICENSE)
