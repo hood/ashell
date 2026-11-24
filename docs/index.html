@@ -78,7 +78,7 @@ h1 .quiet{color:var(--faint)}
 .install{min-width:0;display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:14.5px;background:var(--ink-2);border:1px solid var(--line-2);border-radius:12px;padding:12px 12px 12px 18px;max-width:100%}
 .install span{color:var(--lime)}
 .install code{min-width:0;white-space:nowrap;overflow-x:auto;scrollbar-width:none}
-.copy{flex:none;font:500 12px var(--mono);color:var(--ink);background:var(--lime);border:0;border-radius:8px;padding:7px 0;width:calc(6ch + 22px);text-align:center;cursor:pointer;transition:transform .1s}
+.copy{border: 1px solid black;flex:none;font:500 12px var(--mono);color:var(--ink);background:var(--lime);border-radius:8px;padding:7px 0;width:calc(6ch + 22px);text-align:center;cursor:pointer;transition:transform .1s}
 .copy:active{transform:scale(.95)}
 .btn{font-size:15px;font-weight:500;text-decoration:none;padding:12px 20px;border-radius:12px;border:1px solid var(--line-2);transition:border-color .15s}
 .btn:hover{border-color:var(--paper)}
@@ -279,8 +279,8 @@ try{if(!matchMedia('(prefers-reduced-motion: reduce)').matches&&!location.hash&&
 <header class="hero wrap">
   <div class="mark" id="mark" aria-hidden="true"><canvas id="markgl"></canvas><div class="fallback">ashell</div></div>
   <div class="mark-cap"><span id="markstate"><b>●</b> frame 1 · cached</span></div>
-  <h1>Your prompt in <span class="num">115µs</span>.<br><span class="quiet">Never blocks.</span></h1>
-  <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. It draws <strong>frame&nbsp;1 instantly</strong> from cache, then patches in slow stuff like git status as it lands. Nothing on the critical path spawns a process, so even in a 23k-file repo the whole round trip takes <strong>0.115&nbsp;ms</strong>.</p>
+  <h1>Your prompt,<br><span class="num">blazingly fast.</span></h1>
+  <p class="lede">ashell is a shell prompt backed by a tiny per-user daemon. Performance is a first class citizen here, so <strong>frame&nbsp;1 lands in ~115&nbsp;µs</strong>, slow stuff like git status patches in as it finishes, and nothing on the critical path ever spawns a process, even in a 23k-file repo.</p>
   <div class="cta">
     <div class="install"><code><span>$</span> cargo install --locked --git https://github.com/hood/ashell</code><button class="copy" data-copy="cargo install --locked --git https://github.com/hood/ashell">copy</button></div>
     <a class="btn" href="#how">How it works →</a>
